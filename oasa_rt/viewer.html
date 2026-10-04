@@ -26,7 +26,16 @@
   #panel { position: absolute; top: 12px; left: 12px; z-index: 1000; width: 300px; max-width: calc(100% - 64px);
     background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, .18); }
-  #panel h1 { font-size: 15px; margin: 0 0 2px; }
+  #panel h1 { font-size: 15px; margin: 0; }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 2px; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600;
+    color: var(--muted); white-space: nowrap; }
+  .badge i { width: 8px; height: 8px; border-radius: 50%; background: var(--none); }
+  .badge.live { color: var(--fg); }
+  .badge.live i { background: var(--ontime); animation: pulse 2s infinite; }
+  .badge.stale i { background: var(--late3); }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(26, 127, 55, .6); } 70%, 100% { box-shadow: 0 0 0 6px rgba(26, 127, 55, 0); } }
+  @media (prefers-reduced-motion: reduce) { .badge.live i { animation: none; } }
   .muted { color: var(--muted); font-size: 12px; }
   .stats { display: grid; grid-template-columns: repeat(3, auto); justify-content: space-between; gap: 6px; margin: 10px 0; }
   .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -53,7 +62,10 @@
 <body>
 <div id="map"></div>
 <div id="panel">
-  <h1>Λεωφορεία ΟΑΣΑ: live</h1>
+  <div class="head">
+    <h1>Λεωφορεία ΟΑΣΑ</h1>
+    <span class="badge" id="badge"><i></i><span>Σύνδεση…</span></span>
+  </div>
   <div class="muted" id="updated">Φόρτωση…</div>
   <div class="stats">
     <div class="stat"><b id="n-veh">–</b><span>οχήματα</span></div>
@@ -276,11 +288,17 @@ function tick() {
     el.textContent = "πριν " + duration(Math.max(0, now - Number(el.dataset.since)));
   }
   if (lastHeader == null) return;
-  const mode = live ? "ζωντανή ενημέρωση" : `έλεγχος κάθε ${POLL_MS / 1000} δευτερόλεπτα`;
-  document.getElementById("updated").innerHTML =
-    `Feed: ${clock(lastHeader)} (<span data-since="${lastHeader}">πριν ${duration(Math.max(0, now - lastHeader))}</span>) · ${mode}`;
+  const stale = now - lastHeader > STALE_S;
+  const badge = document.getElementById("badge");
+  badge.className = "badge" + (stale ? " stale" : live ? " live" : "");
+  badge.lastElementChild.textContent = stale ? "Χωρίς ενημέρωση" : live ? "Ζωντανά" : "Περιοδικά";
+  badge.title = live ? "Η σελίδα ενημερώνεται μόλις γραφτεί νέο feed"
+                     : `Η σελίδα ελέγχει για νέο feed κάθε ${POLL_MS / 1000} δευτερόλεπτα`;
+  const updated = document.getElementById("updated");
+  updated.innerHTML = `Ενημέρωση <span data-since="${lastHeader}">πριν ${duration(Math.max(0, now - lastHeader))}</span>`;
+  updated.title = "Ώρα feed " + clock(lastHeader);
   const warn = document.getElementById("warn");
-  if (now - lastHeader > STALE_S) {
+  if (stale) {
     warn.style.display = "block";
     warn.textContent = "Το feed δεν ανανεώνεται. Τρέχει το πρόγραμμα;";
   }
