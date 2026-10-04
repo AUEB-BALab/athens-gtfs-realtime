@@ -70,22 +70,26 @@
 <script>
 const REFRESH_MS = 10000;
 const STALE_S = 120;
+const DEFAULT_ROUTE_COLOR = "#3b5bdb";
 
-const map = L.map("map", { zoomControl: false }).setView([37.98, 23.73], 12);
+const map = L.map("map", { zoomControl: false, preferCanvas: true }).setView([37.98, 23.73], 12);
 L.control.zoom({ position: "topright" }).addTo(map);
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
 }).addTo(map);
 
-const markers = new Map();   // vehicle id -> {marker, line}
-let names = { routes: {}, stops: {} };
-let tripNames = {};
+const markers = new Map();      // vehicle id -> {marker, line, tripId, color}
+const routeLayers = new Map();  // line -> [polyline]
+const highlight = L.layerGroup().addTo(map);
+let info = { routes: {}, stops: {}, shapes: {} };   // static.json
+let trips = {};                                     // trips.json
 let fitted = false;
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const fmtMin = s => (s >= 0 ? "+" : "−") + Math.abs(s / 60).toFixed(1).replace(".", ",") + "′";
 const delayClass = d => d == null ? "none" : d <= 120 ? "ontime" : d <= 300 ? "late1" : d <= 600 ? "late2" : "late3";
 const clock = t => new Date(t * 1000).toLocaleTimeString("el-GR", { timeZone: "Europe/Athens", hourCycle: "h23" });
+const routeOf = id => info.routes[id] || { line: id || "?", name: "", color: "" };
 
 async function getJSON(path) {
   const r = await fetch(path + "?t=" + Date.now(), { cache: "no-store" });
@@ -93,15 +97,68 @@ async function getJSON(path) {
   return r.json();
 }
 
+function drawRoutes() {
+  for (const shape of Object.values(info.shapes || {})) {
+    const r = routeOf(shape.route);
+    const line = L.polyline(shape.points, { color: r.color || DEFAULT_ROUTE_COLOR, interactive: false });
+    if (!routeLayers.has(r.line)) routeLayers.set(r.line, []);
+    routeLayers.get(r.line).push(line);
+  }
+  const select = document.getElementById("line");
+  const lines = [...routeLayers.keys()].sort((a, b) => a.localeCompare(b, "el", { numeric: true }));
+  select.innerHTML = '<option value="">Όλες οι γραμμές</option>' + lines.map(l => `<option>${esc(l)}</option>`).join("");
+}
+
+function applyFilter() {
+  const want = document.getElementById("line").value;
+  for (const [line, layers] of routeLayers) {
+    const show = !want || line === want;
+    for (const layer of layers) {
+      if (!show) { layer.remove(); continue; }
+      layer.setStyle(want ? { weight: 5, opacity: 0.85 } : { weight: 3, opacity: 0.35 }).addTo(map);
+    }
+  }
+  for (const { marker, line } of markers.values()) {
+    const show = !want || line === want;
+    if (show && !map.hasLayer(marker)) marker.addTo(map);
+    if (!show && map.hasLayer(marker)) marker.remove();
+  }
+}
+
+// Route and stops of the trip a clicked vehicle is running.
+function showTrip(m) {
+  highlight.clearLayers();
+  const t = trips[m.tripId];
+  if (!t) return;
+  const shape = info.shapes[t.shape];
+  if (shape) {
+    L.polyline(shape.points, { color: "#fff", weight: 9, opacity: 0.9, interactive: false }).addTo(highlight);
+    L.polyline(shape.points, { color: m.color, weight: 5, opacity: 1, interactive: false }).addTo(highlight);
+  }
+  for (const sid of t.stops) {
+    const s = info.stops[sid];
+    if (!s) continue;
+    L.circleMarker([s[1], s[2]], { radius: 4, color: m.color, weight: 2, fillColor: "#fff", fillOpacity: 1 })
+      .bindTooltip(esc(s[0])).addTo(highlight);
+  }
+}
+
+// Pan opened popups clear of the panel: to its right on wide screens, below it on narrow ones.
+function popupOptions() {
+  const r = document.getElementById("panel").getBoundingClientRect();
+  const pad = window.innerWidth < 600 ? L.point(8, r.bottom + 8) : L.point(r.right + 8, 8);
+  return { maxWidth: 360, autoPanPaddingTopLeft: pad };
+}
+
 function tripLabel(id) {
-  const t = tripNames[id];
+  const t = trips[id];
   if (!t) return esc(id);
   return `<span title="${esc(id)}">${esc(t.dep)} ${esc(t.from)} → ${esc(t.to)}</span>`;
 }
 
-function popupHtml(e, tu, line, longName, now) {
+function popupHtml(e, tu, r, now) {
   const v = e.vehicle, trip = v.trip || {};
-  const stopName = names.stops[v.stopId] || "";
+  const stopName = (info.stops[v.stopId] || [""])[0];
   let state = "δεν αντιστοιχίστηκε σε δρομολόγιο";
   if (tu) state = tu.waiting ? "περιμένει στην αφετηρία" : fmtMin(tu.delay);
   const rows = [
@@ -111,57 +168,43 @@ function popupHtml(e, tu, line, longName, now) {
     v.stopId ? ["Επόμενη στάση", `${esc(stopName)} <span class="muted">(${esc(v.stopId)})</span>`] : null,
     ["Θέση GPS", `πριν ${Math.max(0, Math.round(now - Number(v.timestamp)))}″`],
   ].filter(Boolean).map(([k, val]) => `<tr><td>${k}</td><td>${val}</td></tr>`).join("");
-  return `<h3>${esc(line)} <span class="muted">${esc(longName)}</span></h3><table>${rows}</table>`;
-}
-
-function applyFilter() {
-  const want = document.getElementById("line").value;
-  for (const { marker, line } of markers.values()) {
-    const show = !want || line === want;
-    if (show && !map.hasLayer(marker)) marker.addTo(map);
-    if (!show && map.hasLayer(marker)) marker.remove();
-  }
+  return `<h3>${esc(r.line)} <span class="muted">${esc(r.name)}</span></h3><table>${rows}</table>`;
 }
 
 async function refresh() {
   const warn = document.getElementById("warn");
   try {
-    const [vp, tu, tn] = await Promise.all([getJSON("vehicle_positions.json"), getJSON("trip_updates.json"),
+    const [vp, tu, tr] = await Promise.all([getJSON("vehicle_positions.json"), getJSON("trip_updates.json"),
       getJSON("trips.json").catch(() => ({}))]);
-    tripNames = tn;
+    trips = tr;
     const byTrip = {};
     for (const ent of tu.entity || []) {
       const t = ent.tripUpdate, stu = (t.stopTimeUpdate || [])[0] || {};
       byTrip[t.trip.tripId] = { delay: (stu.arrival || stu.departure || {}).delay || 0, waiting: !!stu.departure };
     }
     const header = Number(vp.header.timestamp), now = Date.now() / 1000;
-    const seen = new Set(), delays = [], lines = new Set();
+    const seen = new Set(), delays = [];
     for (const e of vp.entity || []) {
       const v = e.vehicle, id = v.vehicle.id, trip = v.trip || {};
-      const [line, longName] = names.routes[trip.routeId] || [trip.routeId || "?", ""];
+      const r = routeOf(trip.routeId);
       const t = trip.tripId ? byTrip[trip.tripId] : null;
       if (t && !t.waiting) delays.push(t.delay);
-      lines.add(line);
       seen.add(id);
       const icon = L.divIcon({ className: "", iconSize: [34, 20], iconAnchor: [17, 10],
-        html: `<div class="bus ${delayClass(t ? (t.waiting ? 0 : t.delay) : null)}">${esc(line)}</div>` });
+        html: `<div class="bus ${delayClass(t ? (t.waiting ? 0 : t.delay) : null)}">${esc(r.line)}</div>` });
       const pos = [v.position.latitude, v.position.longitude];
       let m = markers.get(id);
       if (!m) {
-        m = { marker: L.marker(pos, { icon }).bindPopup("", { maxWidth: 360 }), line };
+        m = { marker: L.marker(pos, { icon }).bindPopup("", popupOptions()) };
+        m.marker.on("popupopen", () => showTrip(m)).on("popupclose", () => highlight.clearLayers());
         markers.set(id, m);
       } else {
         m.marker.setLatLng(pos).setIcon(icon);
-        m.line = line;
       }
-      m.marker.setPopupContent(popupHtml(e, t, line, longName, now));
+      Object.assign(m, { line: r.line, tripId: trip.tripId, color: r.color || DEFAULT_ROUTE_COLOR });
+      m.marker.setPopupContent(popupHtml(e, t, r, now));
     }
     for (const [id, m] of markers) if (!seen.has(id)) { m.marker.remove(); markers.delete(id); }
-
-    const select = document.getElementById("line"), current = select.value;
-    const sorted = [...lines].sort((a, b) => a.localeCompare(b, "el", { numeric: true }));
-    select.innerHTML = '<option value="">Όλες οι γραμμές</option>' +
-      sorted.map(l => `<option${l === current ? " selected" : ""}>${esc(l)}</option>`).join("");
     applyFilter();
 
     delays.sort((a, b) => a - b);
@@ -183,7 +226,13 @@ async function refresh() {
   }
 }
 
-getJSON("names.json").then(n => { names = n; }).catch(() => {}).finally(() => {
+document.getElementById("line").addEventListener("change", () => {
+  applyFilter();
+  const layers = routeLayers.get(document.getElementById("line").value);
+  if (layers) map.fitBounds(L.featureGroup(layers).getBounds().pad(0.05));
+});
+
+getJSON("static.json").then(d => { info = d; drawRoutes(); }).catch(() => {}).finally(() => {
   refresh();
   setInterval(refresh, REFRESH_MS);
 });

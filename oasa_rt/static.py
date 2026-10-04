@@ -110,6 +110,7 @@ class StaticGTFS:
         self.line_names = set(line_names)
         self.routes = {}           # route_id -> route_short_name, for the selected lines
         self.route_long_names = {} # route_id -> route_long_name
+        self.route_colors = {}     # route_id -> route_color (hex, no '#')
         self.stops = {}            # stop_id -> (lat, lon, name)
         self.trips = {}            # trip_id -> Trip
         self.shapes = {}           # shape_id -> [(lat, lon), ...] in sequence order
@@ -138,6 +139,7 @@ class StaticGTFS:
                 if r["route_short_name"] in self.line_names:
                     self.routes[r["route_id"]] = r["route_short_name"]
                     self.route_long_names[r["route_id"]] = r.get("route_long_name", "")
+                    self.route_colors[r["route_id"]] = r.get("route_color", "")
             for r in csv.DictReader(self._open(zf, "trips.txt")):
                 if r["route_id"] in self.routes:
                     self.trips[r["trip_id"]] = Trip(r["trip_id"], r["route_id"], r["service_id"],

@@ -15,7 +15,7 @@ import threading
 import time
 from datetime import datetime
 
-from .feed import build_feeds, write_feeds, write_names, write_trip_names
+from .feed import build_feeds, write_feeds, write_static, write_trip_info
 from .matcher import Matcher, RouteMapper
 from .static import StaticGTFS, download_gtfs, refresh_gtfs
 from .telematics import ATHENS, Telematics, parse_cs_date
@@ -71,7 +71,7 @@ def main():
         print(f"downloading static GTFS to {args.gtfs} ...")
         download_gtfs(args.gtfs)
     gtfs, matcher = load_static(args.gtfs, lines, tel)
-    write_names(args.out, gtfs)
+    write_static(args.out, gtfs)
     if args.serve:
         os.makedirs(args.out, exist_ok=True)
         serve(args.out, args.serve)
@@ -89,7 +89,7 @@ def main():
                 if refresh_gtfs(args.gtfs):
                     print("a new static GTFS was published; reloading", file=sys.stderr)
                     gtfs, matcher = load_static(args.gtfs, lines, tel)
-                    write_names(args.out, gtfs)
+                    write_static(args.out, gtfs)
             except Exception as exc:  # keep serving with the current feed
                 print(f"static GTFS update check failed: {exc!r}", file=sys.stderr)
             warn_expiry(gtfs)
@@ -101,7 +101,7 @@ def main():
         # Stamp the feed when polling finished, so consecutive headers are evenly spaced.
         vehicles_msg, trips_msg = build_feeds(matches, datetime.now(ATHENS))
         write_feeds(args.out, vehicles_msg, trips_msg)
-        write_trip_names(args.out, matches, gtfs)
+        write_trip_info(args.out, matches, gtfs)
         _report(now, matches, tel.requests, time.monotonic() - cycle_start)
         if args.once:
             return 0

@@ -86,19 +86,28 @@ def write_feeds(out_dir, vehicles, trip_updates):
             json_format.MessageToDict(msg), ensure_ascii=False, indent=1).encode("utf-8"))
 
 
-def write_names(out_dir, gtfs):
-    """Line and stop names for the map viewer, which otherwise only sees ids in the feed."""
+def write_static(out_dir, gtfs):
+    """Line names and colours, stop names and positions, and route shapes for the map viewer,
+    which otherwise only sees ids in the feed."""
     os.makedirs(out_dir, exist_ok=True)
     stop_ids = {st[1] for trip in gtfs.trips.values() for st in trip.stop_times}
-    names = {
-        "routes": {rid: [short, gtfs.route_long_names.get(rid, "")] for rid, short in gtfs.routes.items()},
-        "stops": {sid: gtfs.stops[sid][2] for sid in stop_ids if sid in gtfs.stops},
+    shape_route = {}
+    for trip in gtfs.trips.values():
+        shape_route.setdefault(trip.shape_id, trip.route_id)
+    data = {
+        "routes": {rid: {"line": short, "name": gtfs.route_long_names.get(rid, ""),
+                         "color": "#" + gtfs.route_colors[rid] if gtfs.route_colors.get(rid) else ""}
+                   for rid, short in gtfs.routes.items()},
+        "stops": {sid: [gtfs.stops[sid][2], round(gtfs.stops[sid][0], 5), round(gtfs.stops[sid][1], 5)]
+                  for sid in stop_ids if sid in gtfs.stops},
+        "shapes": {sid: {"route": rid, "points": [[round(lat, 5), round(lon, 5)] for lat, lon in gtfs.shapes[sid]]}
+                   for sid, rid in shape_route.items() if sid in gtfs.shapes},
     }
-    _write_atomic(os.path.join(out_dir, "names.json"), json.dumps(names, ensure_ascii=False).encode("utf-8"))
+    _write_atomic(os.path.join(out_dir, "static.json"), json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
 
-def write_trip_names(out_dir, matches, gtfs):
-    """Departure time and terminals of the trips in the feed, for the map viewer."""
+def write_trip_info(out_dir, matches, gtfs):
+    """Departure time, terminals, shape and stops of the trips in the feed, for the map viewer."""
     trips = {}
     for m in matches:
         if m.trip is None:
@@ -109,5 +118,7 @@ def write_trip_names(out_dir, matches, gtfs):
             "dep": f"{hours % 24:02d}:{minutes:02d}",   # GTFS allows 24:35 for 00:35 after midnight
             "from": gtfs.stops.get(first[1], (0, 0, first[1]))[2],
             "to": gtfs.stops.get(last[1], (0, 0, last[1]))[2],
+            "shape": m.trip.shape_id,
+            "stops": [st[1] for st in m.trip.stop_times],
         }
     _write_atomic(os.path.join(out_dir, "trips.json"), json.dumps(trips, ensure_ascii=False).encode("utf-8"))
