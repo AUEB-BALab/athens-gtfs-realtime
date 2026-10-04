@@ -11,17 +11,17 @@
   :root {
     --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --panel: rgba(255, 255, 255, .95); --border: #d2d2d7;
     --ontime: #1a7f37; --late1: #a87c00; --late2: #d9480f; --late3: #c92a2a; --none: #6c757d; --warn-bg: #fff3cd;
-    --control: #f2f2f4; --control-hover: #e8e8ed; --accent: #0071e3; --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%236e6e73' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    --control: #f2f2f4; --control-hover: #e8e8ed; --menu: #ffffff; --accent: #0071e3; --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%236e6e73' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: #111113; --fg: #f5f5f7; --muted: #a1a1a6; --panel: rgba(28, 28, 30, .95); --border: #3a3a3c; --warn-bg: #4a3b00;
-      --control: #2c2c2e; --control-hover: #3a3a3c; --accent: #0a84ff; --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%23a1a1a6' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+      --control: #2c2c2e; --control-hover: #3a3a3c; --menu: #2c2c2e; --accent: #0a84ff; --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%23a1a1a6' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     }
   }
   :root[data-theme="dark"] {
     --bg: #111113; --fg: #f5f5f7; --muted: #a1a1a6; --panel: rgba(28, 28, 30, .95); --border: #3a3a3c; --warn-bg: #4a3b00;
-    --control: #2c2c2e; --control-hover: #3a3a3c; --accent: #0a84ff; --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%23a1a1a6' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    --control: #2c2c2e; --control-hover: #3a3a3c; --menu: #2c2c2e; --accent: #0a84ff; --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%23a1a1a6' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
     font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
@@ -46,13 +46,21 @@
   .stat span { color: var(--muted); font-size: 11px; }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 8px 0 10px; font-size: 12px; }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
-  select { width: 100%; appearance: none; -webkit-appearance: none; cursor: pointer;
-    padding: 7px 32px 7px 10px; border-radius: 8px; border: 1px solid transparent;
-    background: var(--control) var(--chevron) no-repeat right 11px center / 12px 8px;
+  /* Line filter: a custom listbox, because native <select> menus on macOS open over the control. */
+  .dropdown { position: relative; }
+  #line-button { width: 100%; cursor: pointer; text-align: left; padding: 7px 32px 7px 10px; border-radius: 8px;
+    border: 1px solid transparent; background: var(--control) var(--chevron) no-repeat right 11px center / 12px 8px;
     color: var(--fg); font: inherit; font-size: 13px; transition: background-color .15s; }
-  select:hover { background-color: var(--control-hover); }
-  select:focus { outline: none; }
-  select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #line-button:hover, #line-button[aria-expanded="true"] { background-color: var(--control-hover); }
+  #line-button:focus { outline: none; }
+  #line-button:focus-visible, #line-list:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #line-list { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 10; margin: 0; padding: 4px;
+    list-style: none; max-height: min(320px, 50vh); overflow-y: auto; background: var(--menu);
+    border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .25); font-size: 13px; }
+  #line-list:focus { outline: none; }
+  #line-list li { position: relative; padding: 6px 10px 6px 28px; border-radius: 6px; cursor: pointer; }
+  #line-list li.active { background: var(--accent); color: #fff; }
+  #line-list li[aria-selected="true"]::before { content: "✓"; position: absolute; left: 10px; }
   #warn { display: none; margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: var(--warn-bg); font-size: 12px; }
   .bus { width: 34px; height: 20px; border-radius: 10px; color: #fff; font: 600 11px/16px system-ui, sans-serif;
     text-align: center; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .45); box-sizing: border-box;
@@ -85,7 +93,10 @@
     <span><i class="late2"></i>5–10 λεπτά</span><span><i class="late3"></i>πάνω από 10 λεπτά</span>
     <span><i class="none"></i>χωρίς δρομολόγιο</span>
   </div>
-  <select id="line"><option value="">Όλες οι γραμμές</option></select>
+  <div class="dropdown" id="line-filter">
+    <button type="button" id="line-button" aria-haspopup="listbox" aria-expanded="false" aria-label="Γραμμή">Όλες οι γραμμές</button>
+    <ul id="line-list" role="listbox" tabindex="-1" aria-label="Γραμμή" hidden></ul>
+  </div>
   <div id="warn"></div>
 </div>
 <script>
@@ -140,13 +151,11 @@ function drawRoutes() {
     if (!routeLayers.has(r.line)) routeLayers.set(r.line, []);
     routeLayers.get(r.line).push(line);
   }
-  const select = document.getElementById("line");
-  const lines = [...routeLayers.keys()].sort((a, b) => a.localeCompare(b, "el", { numeric: true }));
-  select.innerHTML = '<option value="">Όλες οι γραμμές</option>' + lines.map(l => `<option>${esc(l)}</option>`).join("");
+  setLineOptions([...routeLayers.keys()].sort((a, b) => a.localeCompare(b, "el", { numeric: true })));
 }
 
 function applyFilter() {
-  const want = document.getElementById("line").value;
+  const want = selectedLine;
   for (const [line, layers] of routeLayers) {
     const show = !want || line === want;
     for (const layer of layers) {
@@ -268,11 +277,75 @@ async function refresh() {
   }
 }
 
-document.getElementById("line").addEventListener("change", () => {
+// ---- Line filter (custom listbox) ----
+let selectedLine = "";
+let activeIndex = 0;
+const lineButton = document.getElementById("line-button");
+const lineList = document.getElementById("line-list");
+const lineItems = () => [...lineList.children];
+
+function setLineOptions(lines) {
+  lineList.innerHTML = ["", ...lines].map((l, i) =>
+    `<li role="option" id="line-opt-${i}" data-line="${esc(l)}" aria-selected="${l === selectedLine}">` +
+    `${l ? esc(l) : "Όλες οι γραμμές"}</li>`).join("");
+}
+
+function setActive(i) {
+  const items = lineItems();
+  activeIndex = Math.max(0, Math.min(items.length - 1, i));
+  items.forEach((li, k) => li.classList.toggle("active", k === activeIndex));
+  if (items[activeIndex]) {
+    lineList.setAttribute("aria-activedescendant", items[activeIndex].id);
+    items[activeIndex].scrollIntoView({ block: "nearest" });
+  }
+}
+
+function openLineList() {
+  lineList.hidden = false;
+  lineButton.setAttribute("aria-expanded", "true");
+  setActive(lineItems().findIndex(li => li.dataset.line === selectedLine));
+  lineList.focus();
+}
+
+function closeLineList(refocus = true) {
+  lineList.hidden = true;
+  lineButton.setAttribute("aria-expanded", "false");
+  if (refocus) lineButton.focus();
+}
+
+function chooseLine(line) {
+  selectedLine = line;
+  lineButton.textContent = line || "Όλες οι γραμμές";
+  for (const li of lineItems()) li.setAttribute("aria-selected", String(li.dataset.line === line));
+  closeLineList();
   map.closePopup();
   applyFilter();
-  const layers = routeLayers.get(document.getElementById("line").value);
+  const layers = routeLayers.get(line);
   if (layers) map.fitBounds(L.featureGroup(layers).getBounds().pad(0.05));
+}
+
+lineButton.addEventListener("click", () => (lineList.hidden ? openLineList() : closeLineList()));
+lineButton.addEventListener("keydown", e => {
+  if (["ArrowDown", "ArrowUp", "Enter", " "].includes(e.key)) { e.preventDefault(); openLineList(); }
+});
+lineList.addEventListener("keydown", e => {
+  const last = lineItems().length - 1;
+  const moves = { ArrowDown: activeIndex + 1, ArrowUp: activeIndex - 1, Home: 0, End: last };
+  if (e.key in moves) { e.preventDefault(); setActive(moves[e.key]); }
+  else if (e.key === "Enter" || e.key === " ") { e.preventDefault(); chooseLine(lineItems()[activeIndex].dataset.line); }
+  else if (e.key === "Escape") { e.preventDefault(); closeLineList(); }
+  else if (e.key === "Tab") closeLineList(false);
+});
+lineList.addEventListener("click", e => {
+  const li = e.target.closest("li");
+  if (li) chooseLine(li.dataset.line);
+});
+lineList.addEventListener("mousemove", e => {
+  const li = e.target.closest("li");
+  if (li) setActive(lineItems().indexOf(li));
+});
+document.addEventListener("click", e => {
+  if (!lineList.hidden && !e.target.closest("#line-filter")) closeLineList(false);
 });
 
 // Move a marker smoothly to its new position; long jumps (new trip, GPS glitch) are not animated.
