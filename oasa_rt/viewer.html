@@ -28,8 +28,9 @@
     box-shadow: 0 4px 16px rgba(0, 0, 0, .18); }
   #panel h1 { font-size: 15px; margin: 0 0 2px; }
   .muted { color: var(--muted); font-size: 12px; }
-  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 10px 0; }
-  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .stats { display: grid; grid-template-columns: repeat(3, auto); justify-content: space-between; gap: 6px; margin: 10px 0; }
+  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .stat b small { font-size: 13px; font-weight: 600; }
   .stat span { color: var(--muted); font-size: 11px; }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 8px 0 10px; font-size: 12px; }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
@@ -60,8 +61,8 @@
     <div class="stat"><b id="median">–</b><span>διάμεση καθυστ.</span></div>
   </div>
   <div class="legend">
-    <span><i class="ontime"></i>έως 2′</span><span><i class="late1"></i>2–5′</span>
-    <span><i class="late2"></i>5–10′</span><span><i class="late3"></i>&gt;10′</span>
+    <span><i class="ontime"></i>έως 2 λεπτά</span><span><i class="late1"></i>2–5 λεπτά</span>
+    <span><i class="late2"></i>5–10 λεπτά</span><span><i class="late3"></i>πάνω από 10 λεπτά</span>
     <span><i class="none"></i>χωρίς δρομολόγιο</span>
   </div>
   <select id="line"><option value="">Όλες οι γραμμές</option></select>
@@ -72,7 +73,8 @@ const REFRESH_MS = 10000;
 const STALE_S = 120;
 const DEFAULT_ROUTE_COLOR = "#3b5bdb";
 
-const map = L.map("map", { zoomControl: false, preferCanvas: true }).setView([37.98, 23.73], 12);
+// A few pixels of click tolerance so thin route lines are easy to hit.
+const map = L.map("map", { zoomControl: false, renderer: L.canvas({ tolerance: 6 }) }).setView([37.98, 23.73], 12);
 L.control.zoom({ position: "topright" }).addTo(map);
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
@@ -86,7 +88,17 @@ let trips = {};                                     // trips.json
 let fitted = false;
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const fmtMin = s => (s >= 0 ? "+" : "−") + Math.abs(s / 60).toFixed(1).replace(".", ",") + "′";
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// 144 -> "2 λεπτά και 24 δευτερόλεπτα"
+function duration(sec) {
+  sec = Math.round(Math.abs(sec));
+  const m = Math.floor(sec / 60), s = sec % 60, parts = [];
+  if (m) parts.push(plural(m, "λεπτό", "λεπτά"));
+  if (s || !m) parts.push(plural(s, "δευτερόλεπτο", "δευτερόλεπτα"));
+  return parts.join(" και ");
+}
+const fmtDelay = s => s === 0 ? "καμία" : s > 0 ? duration(s) : duration(s) + " νωρίτερα";
+const fmtMinutes = s => (s >= 0 ? "+" : "−") + Math.abs(s / 60).toFixed(1).replace(".", ",") + " <small>λεπτά</small>";
 const delayClass = d => d == null ? "none" : d <= 120 ? "ontime" : d <= 300 ? "late1" : d <= 600 ? "late2" : "late3";
 const clock = t => new Date(t * 1000).toLocaleTimeString("el-GR", { timeZone: "Europe/Athens", hourCycle: "h23" });
 const routeOf = id => info.routes[id] || { line: id || "?", name: "", color: "" };
@@ -98,9 +110,10 @@ async function getJSON(path) {
 }
 
 function drawRoutes() {
-  for (const shape of Object.values(info.shapes || {})) {
-    const r = routeOf(shape.route);
-    const line = L.polyline(shape.points, { color: r.color || DEFAULT_ROUTE_COLOR, interactive: false });
+  for (const [sid, shape] of Object.entries(info.shapes || {})) {
+    const r = routeOf(shape.route), color = r.color || DEFAULT_ROUTE_COLOR;
+    const line = L.polyline(shape.points, { color }).bindPopup(routePopup(r, shape), popupOptions());
+    line.on("popupopen", () => showRoute(sid, shape.stops, color)).on("popupclose", () => highlight.clearLayers());
     if (!routeLayers.has(r.line)) routeLayers.set(r.line, []);
     routeLayers.get(r.line).push(line);
   }
@@ -125,22 +138,26 @@ function applyFilter() {
   }
 }
 
-// Route and stops of the trip a clicked vehicle is running.
-function showTrip(m) {
+// Emphasise one route and show its stops (a clicked route, or the trip of a clicked vehicle).
+function showRoute(shapeId, stopIds, color) {
   highlight.clearLayers();
-  const t = trips[m.tripId];
-  if (!t) return;
-  const shape = info.shapes[t.shape];
+  const shape = info.shapes[shapeId];
   if (shape) {
-    L.polyline(shape.points, { color: "#fff", weight: 9, opacity: 0.9, interactive: false }).addTo(highlight);
-    L.polyline(shape.points, { color: m.color, weight: 5, opacity: 1, interactive: false }).addTo(highlight);
+    L.polyline(shape.points, { color: "#fff", weight: 9, opacity: 0.9, interactive: false }).addTo(highlight).bringToFront();
+    L.polyline(shape.points, { color, weight: 5, opacity: 1, interactive: false }).addTo(highlight).bringToFront();
   }
-  for (const sid of t.stops) {
+  for (const sid of stopIds || []) {
     const s = info.stops[sid];
     if (!s) continue;
-    L.circleMarker([s[1], s[2]], { radius: 4, color: m.color, weight: 2, fillColor: "#fff", fillOpacity: 1 })
+    L.circleMarker([s[1], s[2]], { radius: 4, color, weight: 2, fillColor: "#fff", fillOpacity: 1 })
       .bindTooltip(esc(s[0])).addTo(highlight);
   }
+}
+
+function routePopup(r, shape) {
+  const name = i => esc((info.stops[shape.stops[i]] || [""])[0]);
+  return `<h3>${esc(r.line)} <span class="muted">${esc(r.name)}</span></h3>
+    ${name(0)} → ${name(shape.stops.length - 1)}<br><span class="muted">${shape.stops.length} στάσεις</span>`;
 }
 
 // Pan opened popups clear of the panel: to its right on wide screens, below it on narrow ones.
@@ -160,13 +177,13 @@ function popupHtml(e, tu, r, now) {
   const v = e.vehicle, trip = v.trip || {};
   const stopName = (info.stops[v.stopId] || [""])[0];
   let state = "δεν αντιστοιχίστηκε σε δρομολόγιο";
-  if (tu) state = tu.waiting ? "περιμένει στην αφετηρία" : fmtMin(tu.delay);
+  if (tu) state = tu.waiting ? "περιμένει στην αφετηρία" : fmtDelay(tu.delay);
   const rows = [
     ["Όχημα", esc(v.vehicle.id)],
     ["Καθυστέρηση", state],
     trip.tripId ? ["Δρομολόγιο", tripLabel(trip.tripId)] : null,
     v.stopId ? ["Επόμενη στάση", `${esc(stopName)} <span class="muted">(${esc(v.stopId)})</span>`] : null,
-    ["Θέση GPS", `πριν ${Math.max(0, Math.round(now - Number(v.timestamp)))}″`],
+    ["Θέση GPS", `πριν ${duration(Math.max(0, now - Number(v.timestamp)))}`],
   ].filter(Boolean).map(([k, val]) => `<tr><td>${k}</td><td>${val}</td></tr>`).join("");
   return `<h3>${esc(r.line)} <span class="muted">${esc(r.name)}</span></h3><table>${rows}</table>`;
 }
@@ -196,7 +213,10 @@ async function refresh() {
       let m = markers.get(id);
       if (!m) {
         m = { marker: L.marker(pos, { icon }).bindPopup("", popupOptions()) };
-        m.marker.on("popupopen", () => showTrip(m)).on("popupclose", () => highlight.clearLayers());
+        m.marker.on("popupopen", () => {
+          const t = trips[m.tripId];
+          if (t) showRoute(t.shape, t.stops, m.color);
+        }).on("popupclose", () => highlight.clearLayers());
         markers.set(id, m);
       } else {
         m.marker.setLatLng(pos).setIcon(icon);
@@ -210,9 +230,9 @@ async function refresh() {
     delays.sort((a, b) => a - b);
     document.getElementById("n-veh").textContent = markers.size;
     document.getElementById("n-trip").textContent = Object.keys(byTrip).length;
-    document.getElementById("median").textContent = delays.length ? fmtMin(delays[delays.length >> 1]) : "–";
+    document.getElementById("median").innerHTML = delays.length ? fmtMinutes(delays[delays.length >> 1]) : "–";
     document.getElementById("updated").textContent =
-      `Feed: ${clock(header)} (πριν ${Math.max(0, Math.round(now - header))}″) · ανανέωση κάθε ${REFRESH_MS / 1000}″`;
+      `Feed: ${clock(header)} (πριν ${duration(Math.max(0, now - header))}) · ανανέωση κάθε ${REFRESH_MS / 1000} δευτερόλεπτα`;
     const stale = now - header > STALE_S;
     warn.style.display = stale ? "block" : "none";
     warn.textContent = stale ? "Το feed δεν ανανεώνεται. Τρέχει το πρόγραμμα;" : "";
@@ -227,6 +247,7 @@ async function refresh() {
 }
 
 document.getElementById("line").addEventListener("change", () => {
+  map.closePopup();
   applyFilter();
   const layers = routeLayers.get(document.getElementById("line").value);
   if (layers) map.fitBounds(L.featureGroup(layers).getBounds().pad(0.05));

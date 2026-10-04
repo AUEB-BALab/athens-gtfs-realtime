@@ -2,6 +2,7 @@
 
 import json
 import os
+from collections import Counter
 
 from google.protobuf import json_format
 from google.transit import gtfs_realtime_pb2 as rt
@@ -91,16 +92,19 @@ def write_static(out_dir, gtfs):
     which otherwise only sees ids in the feed."""
     os.makedirs(out_dir, exist_ok=True)
     stop_ids = {st[1] for trip in gtfs.trips.values() for st in trip.stop_times}
-    shape_route = {}
+    shape_route, patterns = {}, {}
     for trip in gtfs.trips.values():
         shape_route.setdefault(trip.shape_id, trip.route_id)
+        patterns.setdefault(trip.shape_id, Counter())[trip.pattern] += 1
     data = {
         "routes": {rid: {"line": short, "name": gtfs.route_long_names.get(rid, ""),
                          "color": "#" + gtfs.route_colors[rid] if gtfs.route_colors.get(rid) else ""}
                    for rid, short in gtfs.routes.items()},
         "stops": {sid: [gtfs.stops[sid][2], round(gtfs.stops[sid][0], 5), round(gtfs.stops[sid][1], 5)]
                   for sid in stop_ids if sid in gtfs.stops},
-        "shapes": {sid: {"route": rid, "points": [[round(lat, 5), round(lon, 5)] for lat, lon in gtfs.shapes[sid]]}
+        # Each shape's stops are those of its most common stop pattern.
+        "shapes": {sid: {"route": rid, "stops": list(patterns[sid].most_common(1)[0][0]),
+                         "points": [[round(lat, 5), round(lon, 5)] for lat, lon in gtfs.shapes[sid]]}
                    for sid, rid in shape_route.items() if sid in gtfs.shapes},
     }
     _write_atomic(os.path.join(out_dir, "static.json"), json.dumps(data, ensure_ascii=False).encode("utf-8"))
