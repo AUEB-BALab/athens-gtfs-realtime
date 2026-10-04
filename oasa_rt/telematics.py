@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 BASE_URL = "https://telematics.oasa.gr/api/"
 ATHENS = ZoneInfo("Europe/Athens")
-USER_AGENT = "oasa-gtfs-rt-poc/0.1 (volunteer GTFS-Realtime experiment)"
+USER_AGENT = "athens-gtfs-realtime/0.1 (+https://github.com/foivospro/athens-gtfs-realtime)"
 
 _MONTHS = {m: i for i, m in enumerate(
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}

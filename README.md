@@ -1,4 +1,4 @@
-# oasa-gtfs-rt (Proof of Concept)
+# athens-gtfs-realtime (Proof of Concept)
 
 Ανεξάρτητη υλοποίηση **GTFS-Realtime** για τα λεωφορεία και τα τρόλεϊ του ΟΑΣΑ. Συνδυάζει:
 
@@ -14,6 +14,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m oasa_rt --lines 040,550,Α1 --once              # Εκτέλεση ενός κύκλου -> out/
 .venv/bin/python -m oasa_rt --lines 040,550 --interval 30 --serve 8080
 .venv/bin/python -m oasa_rt.compare --lines 040,550                 # Σύγκριση με τις εκτιμήσεις του ΟΑΣΑ
+.venv/bin/python -m oasa_rt.record --lines 040,550 --end 2026-10-05T10:00   # Καταγραφή σε SQLite για αξιολόγηση
 ```
 
 Απαιτείται Python ≥ 3.9. Αν το `data/osy_gtfs.zip` δεν υπάρχει τοπικά, λαμβάνεται αυτόματα.
