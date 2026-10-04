@@ -16,12 +16,13 @@ from datetime import datetime
 
 from .feed import build_feeds, write_feeds
 from .matcher import Matcher, RouteMapper
-from .static import StaticGTFS, download_gtfs
+from .static import StaticGTFS, download_gtfs, refresh_gtfs
 from .telematics import ATHENS, Telematics, parse_cs_date
 
 # Latin letters that users type for Greek line names (e.g. "A1" for "Α1").
 _GREEK = str.maketrans("ABEZHIKMNOPTYX", "ΑΒΕΖΗΙΚΜΝΟΡΤΥΧ")
 STALE_AFTER = 5 * 60
+EXPIRY_WARNING_DAYS = 7
 
 
 def normalise_line(name):
@@ -45,6 +46,8 @@ def main():
     ap.add_argument("--serve", type=int, metavar="PORT", help="also serve the feeds over HTTP")
     ap.add_argument("--min-request-interval", type=float, default=0.25,
                     help="minimum seconds between API requests (be gentle with OASA's server)")
+    ap.add_argument("--gtfs-check-hours", type=float, default=6,
+                    help="how often to look for a new static GTFS on data.gov.gr (0 = never)")
     args = ap.parse_args()
 
     tel = Telematics(min_interval=args.min_request_interval)
@@ -57,23 +60,27 @@ def main():
     if not os.path.exists(args.gtfs):
         print(f"downloading static GTFS to {args.gtfs} ...")
         download_gtfs(args.gtfs)
-    t0 = time.monotonic()
-    gtfs = StaticGTFS(args.gtfs, lines)
-    print(f"loaded {len(gtfs.trips)} trips for {len(lines)} lines in {time.monotonic() - t0:.1f}s")
-    end = gtfs.feed_end_date()
-    if end and end < datetime.now(ATHENS).date():
-        print(f"WARNING: static GTFS expired on {end}; trip matching will fail", file=sys.stderr)
-    for line in lines:
-        if not gtfs.trips_for_line(line):
-            print(f"note: line {line} has no trips in the static GTFS", file=sys.stderr)
-
-    matcher = Matcher(gtfs, RouteMapper(gtfs, tel))
+    gtfs, matcher = load_static(args.gtfs, lines, tel)
     if args.serve:
         os.makedirs(args.out, exist_ok=True)
         serve(args.out, args.serve)
 
+    if args.gtfs_check_hours > 0:
+        next_check = time.monotonic()
+    else:
+        next_check = float("inf")
+        warn_expiry(gtfs)
     while True:
         cycle_start = time.monotonic()
+        if cycle_start >= next_check:
+            next_check = cycle_start + args.gtfs_check_hours * 3600
+            try:
+                if refresh_gtfs(args.gtfs):
+                    print("a new static GTFS was published; reloading", file=sys.stderr)
+                    gtfs, matcher = load_static(args.gtfs, lines, tel)
+            except Exception as exc:  # keep serving with the current feed
+                print(f"static GTFS update check failed: {exc!r}", file=sys.stderr)
+            warn_expiry(gtfs)
         now = datetime.now(ATHENS)
         tel.requests = 0
         matches = []
@@ -86,6 +93,28 @@ def main():
         if args.once:
             return 0
         time.sleep(max(1.0, args.interval - (time.monotonic() - cycle_start)))
+
+
+def load_static(path, lines, tel):
+    t0 = time.monotonic()
+    gtfs = StaticGTFS(path, lines)
+    print(f"loaded {len(gtfs.trips)} trips for {len(lines)} lines in {time.monotonic() - t0:.1f}s")
+    for line in lines:
+        if not gtfs.trips_for_line(line):
+            print(f"note: line {line} has no trips in the static GTFS", file=sys.stderr)
+    return gtfs, Matcher(gtfs, RouteMapper(gtfs, tel))
+
+
+def warn_expiry(gtfs):
+    end = gtfs.feed_end_date()
+    if end is None:
+        return
+    days_left = (end - datetime.now(ATHENS).date()).days
+    if days_left < 0:
+        print(f"WARNING: static GTFS expired on {end}; no trips can be matched until OASA publishes a new one",
+              file=sys.stderr)
+    elif days_left <= EXPIRY_WARNING_DAYS:
+        print(f"WARNING: static GTFS expires on {end} ({days_left} days left)", file=sys.stderr)
 
 
 def resolve_lines(tel, spec):

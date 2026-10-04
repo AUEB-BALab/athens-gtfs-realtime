@@ -2,22 +2,72 @@
 
 import csv
 import io
+import json
 import os
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from .telematics import ATHENS
+from .telematics import ATHENS, USER_AGENT
 
 # Official OSY (bus/trolley) feed published by OASA on data.gov.gr.
 OSY_GTFS_URL = ("https://data.gov.gr/dataset/fb049bb1-aea6-4443-95fa-8b941dd6a057/resource/"
                 "119db488-16ea-4c76-b560-41c472872390/download/osy_gtfs.zip")
+REQUIRED_FILES = {"stops.txt", "routes.txt", "trips.txt", "stop_times.txt", "calendar.txt"}
 
 
-def download_gtfs(path):
+def remote_version(url=OSY_GTFS_URL):
+    """ETag / Last-Modified / size of the published feed, without downloading it."""
+    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return {"etag": resp.headers.get("ETag"), "last_modified": resp.headers.get("Last-Modified"),
+                "size": resp.headers.get("Content-Length")}
+
+
+def _version_path(path):
+    return path + ".version.json"
+
+
+def download_gtfs(path, url=OSY_GTFS_URL):
+    """Download the feed atomically, refusing files that are not a usable GTFS zip."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    urllib.request.urlretrieve(OSY_GTFS_URL, path)
+    version = remote_version(url)
+    tmp = path + ".tmp"
+    urllib.request.urlretrieve(url, tmp)
+    try:
+        with zipfile.ZipFile(tmp) as zf:
+            missing = REQUIRED_FILES - set(zf.namelist())
+            if missing or zf.testzip() is not None:
+                raise ValueError(f"downloaded GTFS is unusable (missing {sorted(missing)})")
+    except Exception:
+        os.remove(tmp)
+        raise
+    os.replace(tmp, path)
+    with open(_version_path(path), "w") as f:
+        json.dump(version, f)
+
+
+def refresh_gtfs(path, url=OSY_GTFS_URL):
+    """Download the feed again if the published version differs from the local one.
+
+    Returns True when the local file was replaced.
+    """
+    remote = remote_version(url)
+    try:
+        with open(_version_path(path)) as f:
+            local = json.load(f)
+    except FileNotFoundError:
+        local = None
+    if local is None and os.path.exists(path) and remote["size"] == str(os.path.getsize(path)):
+        # A copy fetched before versions were recorded; assume it is current.
+        with open(_version_path(path), "w") as f:
+            json.dump(remote, f)
+        return False
+    if local == remote and os.path.exists(path):
+        return False
+    download_gtfs(path, url)
+    return True
 
 
 def _hms(value):
