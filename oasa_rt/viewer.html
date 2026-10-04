@@ -79,6 +79,7 @@ L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
 
 const markers = new Map();   // vehicle id -> {marker, line}
 let names = { routes: {}, stops: {} };
+let tripNames = {};
 let fitted = false;
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -92,6 +93,12 @@ async function getJSON(path) {
   return r.json();
 }
 
+function tripLabel(id) {
+  const t = tripNames[id];
+  if (!t) return esc(id);
+  return `<span title="${esc(id)}">${esc(t.dep)} ${esc(t.from)} → ${esc(t.to)}</span>`;
+}
+
 function popupHtml(e, tu, line, longName, now) {
   const v = e.vehicle, trip = v.trip || {};
   const stopName = names.stops[v.stopId] || "";
@@ -100,7 +107,7 @@ function popupHtml(e, tu, line, longName, now) {
   const rows = [
     ["Όχημα", esc(v.vehicle.id)],
     ["Καθυστέρηση", state],
-    trip.tripId ? ["Δρομολόγιο", esc(trip.tripId)] : null,
+    trip.tripId ? ["Δρομολόγιο", tripLabel(trip.tripId)] : null,
     v.stopId ? ["Επόμενη στάση", `${esc(stopName)} <span class="muted">(${esc(v.stopId)})</span>`] : null,
     ["Θέση GPS", `πριν ${Math.max(0, Math.round(now - Number(v.timestamp)))}″`],
   ].filter(Boolean).map(([k, val]) => `<tr><td>${k}</td><td>${val}</td></tr>`).join("");
@@ -119,7 +126,9 @@ function applyFilter() {
 async function refresh() {
   const warn = document.getElementById("warn");
   try {
-    const [vp, tu] = await Promise.all([getJSON("vehicle_positions.json"), getJSON("trip_updates.json")]);
+    const [vp, tu, tn] = await Promise.all([getJSON("vehicle_positions.json"), getJSON("trip_updates.json"),
+      getJSON("trips.json").catch(() => ({}))]);
+    tripNames = tn;
     const byTrip = {};
     for (const ent of tu.entity || []) {
       const t = ent.tripUpdate, stu = (t.stopTimeUpdate || [])[0] || {};

@@ -15,7 +15,7 @@ import threading
 import time
 from datetime import datetime
 
-from .feed import build_feeds, write_feeds, write_names
+from .feed import build_feeds, write_feeds, write_names, write_trip_names
 from .matcher import Matcher, RouteMapper
 from .static import StaticGTFS, download_gtfs, refresh_gtfs
 from .telematics import ATHENS, Telematics, parse_cs_date
@@ -33,9 +33,14 @@ def normalise_line(name):
 VIEWER = os.path.join(os.path.dirname(__file__), "viewer.html")
 
 
+class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # the viewer polls every few seconds; per-request logs would drown everything else
+
+
 def serve(directory, port):
     shutil.copyfile(VIEWER, os.path.join(directory, "index.html"))
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=directory)
+    handler = functools.partial(_QuietHandler, directory=directory)
     server = http.server.ThreadingHTTPServer(("", port), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"map: http://localhost:{port}/   feeds: /vehicle_positions.pb and /trip_updates.pb")
@@ -96,6 +101,7 @@ def main():
         # Stamp the feed when polling finished, so consecutive headers are evenly spaced.
         vehicles_msg, trips_msg = build_feeds(matches, datetime.now(ATHENS))
         write_feeds(args.out, vehicles_msg, trips_msg)
+        write_trip_names(args.out, matches, gtfs)
         _report(now, matches, tel.requests, time.monotonic() - cycle_start)
         if args.once:
             return 0

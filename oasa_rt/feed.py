@@ -95,3 +95,19 @@ def write_names(out_dir, gtfs):
         "stops": {sid: gtfs.stops[sid][2] for sid in stop_ids if sid in gtfs.stops},
     }
     _write_atomic(os.path.join(out_dir, "names.json"), json.dumps(names, ensure_ascii=False).encode("utf-8"))
+
+
+def write_trip_names(out_dir, matches, gtfs):
+    """Departure time and terminals of the trips in the feed, for the map viewer."""
+    trips = {}
+    for m in matches:
+        if m.trip is None:
+            continue
+        first, last = m.trip.stop_times[0], m.trip.stop_times[-1]
+        hours, minutes = divmod(first[3] // 60, 60)
+        trips[m.trip.trip_id] = {
+            "dep": f"{hours % 24:02d}:{minutes:02d}",   # GTFS allows 24:35 for 00:35 after midnight
+            "from": gtfs.stops.get(first[1], (0, 0, first[1]))[2],
+            "to": gtfs.stops.get(last[1], (0, 0, last[1]))[2],
+        }
+    _write_atomic(os.path.join(out_dir, "trips.json"), json.dumps(trips, ensure_ascii=False).encode("utf-8"))
