@@ -69,7 +69,8 @@
   <div id="warn"></div>
 </div>
 <script>
-const REFRESH_MS = 10000;
+const POLL_MS = 10000;     // fallback when the live /events stream is unavailable
+const GLIDE_MS = 1500;     // vehicles glide to a new position instead of jumping
 const STALE_S = 120;
 const DEFAULT_ROUTE_COLOR = "#3b5bdb";
 
@@ -86,6 +87,8 @@ const highlight = L.layerGroup().addTo(map);
 let info = { routes: {}, stops: {}, shapes: {} };   // static.json
 let trips = {};                                     // trips.json
 let fitted = false;
+let live = false;        // connected to /events
+let lastHeader = null;   // feed header timestamp
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
@@ -183,7 +186,7 @@ function popupHtml(e, tu, r, now) {
     ["Καθυστέρηση", state],
     trip.tripId ? ["Δρομολόγιο", tripLabel(trip.tripId)] : null,
     v.stopId ? ["Επόμενη στάση", `${esc(stopName)} <span class="muted">(${esc(v.stopId)})</span>`] : null,
-    ["Θέση GPS", `πριν ${duration(Math.max(0, now - Number(v.timestamp)))}`],
+    ["Θέση GPS", `<span data-since="${Number(v.timestamp)}">πριν ${duration(Math.max(0, now - Number(v.timestamp)))}</span>`],
   ].filter(Boolean).map(([k, val]) => `<tr><td>${k}</td><td>${val}</td></tr>`).join("");
   return `<h3>${esc(r.line)} <span class="muted">${esc(r.name)}</span></h3><table>${rows}</table>`;
 }
@@ -219,7 +222,8 @@ async function refresh() {
         }).on("popupclose", () => highlight.clearLayers());
         markers.set(id, m);
       } else {
-        m.marker.setLatLng(pos).setIcon(icon);
+        m.marker.setIcon(icon);
+        glide(m.marker, L.latLng(pos));
       }
       Object.assign(m, { line: r.line, tripId: trip.tripId, color: r.color || DEFAULT_ROUTE_COLOR });
       m.marker.setPopupContent(popupHtml(e, t, r, now));
@@ -231,11 +235,9 @@ async function refresh() {
     document.getElementById("n-veh").textContent = markers.size;
     document.getElementById("n-trip").textContent = Object.keys(byTrip).length;
     document.getElementById("median").innerHTML = delays.length ? fmtMinutes(delays[delays.length >> 1]) : "–";
-    document.getElementById("updated").textContent =
-      `Feed: ${clock(header)} (πριν ${duration(Math.max(0, now - header))}) · ανανέωση κάθε ${REFRESH_MS / 1000} δευτερόλεπτα`;
-    const stale = now - header > STALE_S;
-    warn.style.display = stale ? "block" : "none";
-    warn.textContent = stale ? "Το feed δεν ανανεώνεται. Τρέχει το πρόγραμμα;" : "";
+    lastHeader = header;
+    warn.style.display = "none";
+    tick();
     if (!fitted && markers.size) {
       map.fitBounds(L.featureGroup([...markers.values()].map(m => m.marker)).getBounds().pad(0.1));
       fitted = true;
@@ -253,9 +255,49 @@ document.getElementById("line").addEventListener("change", () => {
   if (layers) map.fitBounds(L.featureGroup(layers).getBounds().pad(0.05));
 });
 
+// Move a marker smoothly to its new position; long jumps (new trip, GPS glitch) are not animated.
+function glide(marker, to) {
+  const from = marker.getLatLng();
+  cancelAnimationFrame(marker._glide);
+  if (from.equals(to) || map.distance(from, to) > 3000) { marker.setLatLng(to); return; }
+  const t0 = performance.now();
+  const step = t => {
+    const k = Math.min(1, (t - t0) / GLIDE_MS), e = k * (2 - k);   // ease-out
+    marker.setLatLng([from.lat + (to.lat - from.lat) * e, from.lng + (to.lng - from.lng) * e]);
+    if (k < 1) marker._glide = requestAnimationFrame(step);
+  };
+  marker._glide = requestAnimationFrame(step);
+}
+
+// Once a second: "πριν …" counters, the status line and the stale-feed warning.
+function tick() {
+  const now = Date.now() / 1000;
+  for (const el of document.querySelectorAll("[data-since]")) {
+    el.textContent = "πριν " + duration(Math.max(0, now - Number(el.dataset.since)));
+  }
+  if (lastHeader == null) return;
+  const mode = live ? "ζωντανή ενημέρωση" : `έλεγχος κάθε ${POLL_MS / 1000} δευτερόλεπτα`;
+  document.getElementById("updated").innerHTML =
+    `Feed: ${clock(lastHeader)} (<span data-since="${lastHeader}">πριν ${duration(Math.max(0, now - lastHeader))}</span>) · ${mode}`;
+  const warn = document.getElementById("warn");
+  if (now - lastHeader > STALE_S) {
+    warn.style.display = "block";
+    warn.textContent = "Το feed δεν ανανεώνεται. Τρέχει το πρόγραμμα;";
+  }
+}
+
+function connectEvents() {
+  const source = new EventSource("events");
+  source.onopen = () => { live = true; refresh(); };
+  source.onmessage = () => refresh();
+  source.onerror = () => { live = false; };   // EventSource reconnects by itself
+}
+
 getJSON("static.json").then(d => { info = d; drawRoutes(); }).catch(() => {}).finally(() => {
   refresh();
-  setInterval(refresh, REFRESH_MS);
+  connectEvents();
+  setInterval(() => { if (!live) refresh(); }, POLL_MS);
+  setInterval(tick, 1000);
 });
 </script>
 </body>

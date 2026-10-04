@@ -33,17 +33,57 @@ def normalise_line(name):
 VIEWER = os.path.join(os.path.dirname(__file__), "viewer.html")
 
 
-class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+class FeedEvents:
+    """Wakes the map viewer's /events streams whenever a new feed has been written."""
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self.version = 0
+
+    def publish(self):
+        with self._cond:
+            self.version += 1
+            self._cond.notify_all()
+
+    def wait(self, seen, timeout):
+        with self._cond:
+            self._cond.wait_for(lambda: self.version != seen, timeout)
+            return self.version
+
+
+class _ViewerHandler(http.server.SimpleHTTPRequestHandler):
+    events = None   # set by serve()
+
     def log_message(self, format, *args):
         pass  # the viewer polls every few seconds; per-request logs would drown everything else
+
+    def do_GET(self):
+        if self.path.split("?")[0] != "/events":
+            return super().do_GET()
+        # Server-sent events: one "feed" message per new feed, comments as keep-alives.
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        seen = self.events.version
+        try:
+            while True:
+                version = self.events.wait(seen, timeout=15)
+                self.wfile.write(b"data: feed\n\n" if version != seen else b": keep-alive\n\n")
+                self.wfile.flush()
+                seen = version
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
 
 def serve(directory, port):
     shutil.copyfile(VIEWER, os.path.join(directory, "index.html"))
-    handler = functools.partial(_QuietHandler, directory=directory)
+    _ViewerHandler.events = FeedEvents()
+    handler = functools.partial(_ViewerHandler, directory=directory)
     server = http.server.ThreadingHTTPServer(("", port), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"map: http://localhost:{port}/   feeds: /vehicle_positions.pb and /trip_updates.pb")
+    return _ViewerHandler.events
 
 
 def main():
@@ -72,9 +112,10 @@ def main():
         download_gtfs(args.gtfs)
     gtfs, matcher = load_static(args.gtfs, lines, tel)
     write_static(args.out, gtfs)
+    events = None
     if args.serve:
         os.makedirs(args.out, exist_ok=True)
-        serve(args.out, args.serve)
+        events = serve(args.out, args.serve)
 
     if args.gtfs_check_hours > 0:
         next_check = time.monotonic()
@@ -102,6 +143,8 @@ def main():
         vehicles_msg, trips_msg = build_feeds(matches, datetime.now(ATHENS))
         write_feeds(args.out, vehicles_msg, trips_msg)
         write_trip_info(args.out, matches, gtfs)
+        if events:
+            events.publish()
         _report(now, matches, tel.requests, time.monotonic() - cycle_start)
         if args.once:
             return 0
