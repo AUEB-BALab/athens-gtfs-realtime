@@ -11,14 +11,17 @@
   :root {
     --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --panel: rgba(255, 255, 255, .95); --border: #d2d2d7;
     --ontime: #1a7f37; --late1: #a87c00; --late2: #d9480f; --late3: #c92a2a; --none: #6c757d; --warn-bg: #fff3cd;
+    --control: #f2f2f4; --control-hover: #e8e8ed; --accent: #0071e3; --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%236e6e73' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: #111113; --fg: #f5f5f7; --muted: #a1a1a6; --panel: rgba(28, 28, 30, .95); --border: #3a3a3c; --warn-bg: #4a3b00;
+      --control: #2c2c2e; --control-hover: #3a3a3c; --accent: #0a84ff; --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%23a1a1a6' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     }
   }
   :root[data-theme="dark"] {
     --bg: #111113; --fg: #f5f5f7; --muted: #a1a1a6; --panel: rgba(28, 28, 30, .95); --border: #3a3a3c; --warn-bg: #4a3b00;
+    --control: #2c2c2e; --control-hover: #3a3a3c; --accent: #0a84ff; --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%23a1a1a6' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
     font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
@@ -43,8 +46,13 @@
   .stat span { color: var(--muted); font-size: 11px; }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 8px 0 10px; font-size: 12px; }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
-  select { width: 100%; padding: 5px 6px; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--bg); color: var(--fg); font: inherit; }
+  select { width: 100%; appearance: none; -webkit-appearance: none; cursor: pointer;
+    padding: 7px 32px 7px 10px; border-radius: 8px; border: 1px solid transparent;
+    background: var(--control) var(--chevron) no-repeat right 11px center / 12px 8px;
+    color: var(--fg); font: inherit; font-size: 13px; transition: background-color .15s; }
+  select:hover { background-color: var(--control-hover); }
+  select:focus { outline: none; }
+  select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   #warn { display: none; margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: var(--warn-bg); font-size: 12px; }
   .bus { width: 34px; height: 20px; border-radius: 10px; color: #fff; font: 600 11px/16px system-ui, sans-serif;
     text-align: center; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .45); box-sizing: border-box;
