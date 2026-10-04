@@ -8,13 +8,14 @@ import argparse
 import functools
 import http.server
 import os
+import shutil
 import statistics
 import sys
 import threading
 import time
 from datetime import datetime
 
-from .feed import build_feeds, write_feeds
+from .feed import build_feeds, write_feeds, write_names
 from .matcher import Matcher, RouteMapper
 from .static import StaticGTFS, download_gtfs, refresh_gtfs
 from .telematics import ATHENS, Telematics, parse_cs_date
@@ -29,11 +30,15 @@ def normalise_line(name):
     return name.strip().upper().translate(_GREEK)
 
 
+VIEWER = os.path.join(os.path.dirname(__file__), "viewer.html")
+
+
 def serve(directory, port):
+    shutil.copyfile(VIEWER, os.path.join(directory, "index.html"))
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=directory)
     server = http.server.ThreadingHTTPServer(("", port), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"serving {directory} on http://localhost:{port}/vehicle_positions.pb and /trip_updates.pb")
+    print(f"map: http://localhost:{port}/   feeds: /vehicle_positions.pb and /trip_updates.pb")
 
 
 def main():
@@ -61,6 +66,7 @@ def main():
         print(f"downloading static GTFS to {args.gtfs} ...")
         download_gtfs(args.gtfs)
     gtfs, matcher = load_static(args.gtfs, lines, tel)
+    write_names(args.out, gtfs)
     if args.serve:
         os.makedirs(args.out, exist_ok=True)
         serve(args.out, args.serve)
@@ -78,6 +84,7 @@ def main():
                 if refresh_gtfs(args.gtfs):
                     print("a new static GTFS was published; reloading", file=sys.stderr)
                     gtfs, matcher = load_static(args.gtfs, lines, tel)
+                    write_names(args.out, gtfs)
             except Exception as exc:  # keep serving with the current feed
                 print(f"static GTFS update check failed: {exc!r}", file=sys.stderr)
             warn_expiry(gtfs)

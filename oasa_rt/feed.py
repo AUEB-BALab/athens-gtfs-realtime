@@ -71,14 +71,27 @@ def build_feeds(matches, now):
     return vehicles, trip_updates
 
 
+def _write_atomic(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+
 def write_feeds(out_dir, vehicles, trip_updates):
     os.makedirs(out_dir, exist_ok=True)
     for name, msg in (("vehicle_positions", vehicles), ("trip_updates", trip_updates)):
-        for ext, data in ((".pb", msg.SerializeToString()),
-                          (".json", json.dumps(json_format.MessageToDict(msg), ensure_ascii=False,
-                                               indent=1).encode("utf-8"))):
-            path = os.path.join(out_dir, name + ext)
-            tmp = path + ".tmp"
-            with open(tmp, "wb") as f:
-                f.write(data)
-            os.replace(tmp, path)
+        _write_atomic(os.path.join(out_dir, name + ".pb"), msg.SerializeToString())
+        _write_atomic(os.path.join(out_dir, name + ".json"), json.dumps(
+            json_format.MessageToDict(msg), ensure_ascii=False, indent=1).encode("utf-8"))
+
+
+def write_names(out_dir, gtfs):
+    """Line and stop names for the map viewer, which otherwise only sees ids in the feed."""
+    os.makedirs(out_dir, exist_ok=True)
+    stop_ids = {st[1] for trip in gtfs.trips.values() for st in trip.stop_times}
+    names = {
+        "routes": {rid: [short, gtfs.route_long_names.get(rid, "")] for rid, short in gtfs.routes.items()},
+        "stops": {sid: gtfs.stops[sid][2] for sid in stop_ids if sid in gtfs.stops},
+    }
+    _write_atomic(os.path.join(out_dir, "names.json"), json.dumps(names, ensure_ascii=False).encode("utf-8"))

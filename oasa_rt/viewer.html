@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="el">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Λεωφορεία live</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --panel: rgba(255, 255, 255, .95); --border: #d2d2d7;
+    --ontime: #1a7f37; --late1: #a87c00; --late2: #d9480f; --late3: #c92a2a; --none: #6c757d; --warn-bg: #fff3cd;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111113; --fg: #f5f5f7; --muted: #a1a1a6; --panel: rgba(28, 28, 30, .95); --border: #3a3a3c; --warn-bg: #4a3b00;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111113; --fg: #f5f5f7; --muted: #a1a1a6; --panel: rgba(28, 28, 30, .95); --border: #3a3a3c; --warn-bg: #4a3b00;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  #map { position: absolute; inset: 0; }
+  #panel { position: absolute; top: 12px; left: 12px; z-index: 1000; width: 300px; max-width: calc(100% - 64px);
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, .18); }
+  #panel h1 { font-size: 15px; margin: 0 0 2px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 10px 0; }
+  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 11px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 8px 0 10px; font-size: 12px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
+  select { width: 100%; padding: 5px 6px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--fg); font: inherit; }
+  #warn { display: none; margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: var(--warn-bg); font-size: 12px; }
+  .bus { width: 34px; height: 20px; border-radius: 10px; color: #fff; font: 600 11px/16px system-ui, sans-serif;
+    text-align: center; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .45); box-sizing: border-box;
+    white-space: nowrap; overflow: hidden; }
+  .ontime { background: var(--ontime); } .late1 { background: var(--late1); } .late2 { background: var(--late2); }
+  .late3 { background: var(--late3); } .none { background: var(--none); }
+  .leaflet-popup-content { font-size: 13px; min-width: 230px; }
+  .leaflet-popup-content h3 { margin: 0 0 4px; font-size: 14px; }
+  .leaflet-popup-content table { border-collapse: collapse; margin: 4px 0; }
+  .leaflet-popup-content td { padding: 1px 8px 1px 0; vertical-align: top; }
+  .leaflet-popup-content td:first-child { color: #6e6e73; white-space: nowrap; }
+  @media (max-width: 520px) { #panel { width: auto; right: 64px; } .stats { gap: 2px; } }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <h1>Λεωφορεία ΟΑΣΑ: live</h1>
+  <div class="muted" id="updated">Φόρτωση…</div>
+  <div class="stats">
+    <div class="stat"><b id="n-veh">–</b><span>οχήματα</span></div>
+    <div class="stat"><b id="n-trip">–</b><span>με δρομολόγιο</span></div>
+    <div class="stat"><b id="median">–</b><span>διάμεση καθυστ.</span></div>
+  </div>
+  <div class="legend">
+    <span><i class="ontime"></i>έως 2′</span><span><i class="late1"></i>2–5′</span>
+    <span><i class="late2"></i>5–10′</span><span><i class="late3"></i>&gt;10′</span>
+    <span><i class="none"></i>χωρίς δρομολόγιο</span>
+  </div>
+  <select id="line"><option value="">Όλες οι γραμμές</option></select>
+  <div id="warn"></div>
+</div>
+<script>
+const REFRESH_MS = 10000;
+const STALE_S = 120;
+
+const map = L.map("map", { zoomControl: false }).setView([37.98, 23.73], 12);
+L.control.zoom({ position: "topright" }).addTo(map);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
+}).addTo(map);
+
+const markers = new Map();   // vehicle id -> {marker, line}
+let names = { routes: {}, stops: {} };
+let fitted = false;
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmtMin = s => (s >= 0 ? "+" : "−") + Math.abs(s / 60).toFixed(1).replace(".", ",") + "′";
+const delayClass = d => d == null ? "none" : d <= 120 ? "ontime" : d <= 300 ? "late1" : d <= 600 ? "late2" : "late3";
+const clock = t => new Date(t * 1000).toLocaleTimeString("el-GR", { timeZone: "Europe/Athens", hourCycle: "h23" });
+
+async function getJSON(path) {
+  const r = await fetch(path + "?t=" + Date.now(), { cache: "no-store" });
+  if (!r.ok) throw new Error(path + ": HTTP " + r.status);
+  return r.json();
+}
+
+function popupHtml(e, tu, line, longName, now) {
+  const v = e.vehicle, trip = v.trip || {};
+  const stopName = names.stops[v.stopId] || "";
+  let state = "δεν αντιστοιχίστηκε σε δρομολόγιο";
+  if (tu) state = tu.waiting ? "περιμένει στην αφετηρία" : fmtMin(tu.delay);
+  const rows = [
+    ["Όχημα", esc(v.vehicle.id)],
+    ["Καθυστέρηση", state],
+    trip.tripId ? ["Δρομολόγιο", esc(trip.tripId)] : null,
+    v.stopId ? ["Επόμενη στάση", `${esc(stopName)} <span class="muted">(${esc(v.stopId)})</span>`] : null,
+    ["Θέση GPS", `πριν ${Math.max(0, Math.round(now - Number(v.timestamp)))}″`],
+  ].filter(Boolean).map(([k, val]) => `<tr><td>${k}</td><td>${val}</td></tr>`).join("");
+  return `<h3>${esc(line)} <span class="muted">${esc(longName)}</span></h3><table>${rows}</table>`;
+}
+
+function applyFilter() {
+  const want = document.getElementById("line").value;
+  for (const { marker, line } of markers.values()) {
+    const show = !want || line === want;
+    if (show && !map.hasLayer(marker)) marker.addTo(map);
+    if (!show && map.hasLayer(marker)) marker.remove();
+  }
+}
+
+async function refresh() {
+  const warn = document.getElementById("warn");
+  try {
+    const [vp, tu] = await Promise.all([getJSON("vehicle_positions.json"), getJSON("trip_updates.json")]);
+    const byTrip = {};
+    for (const ent of tu.entity || []) {
+      const t = ent.tripUpdate, stu = (t.stopTimeUpdate || [])[0] || {};
+      byTrip[t.trip.tripId] = { delay: (stu.arrival || stu.departure || {}).delay || 0, waiting: !!stu.departure };
+    }
+    const header = Number(vp.header.timestamp), now = Date.now() / 1000;
+    const seen = new Set(), delays = [], lines = new Set();
+    for (const e of vp.entity || []) {
+      const v = e.vehicle, id = v.vehicle.id, trip = v.trip || {};
+      const [line, longName] = names.routes[trip.routeId] || [trip.routeId || "?", ""];
+      const t = trip.tripId ? byTrip[trip.tripId] : null;
+      if (t && !t.waiting) delays.push(t.delay);
+      lines.add(line);
+      seen.add(id);
+      const icon = L.divIcon({ className: "", iconSize: [34, 20], iconAnchor: [17, 10],
+        html: `<div class="bus ${delayClass(t ? (t.waiting ? 0 : t.delay) : null)}">${esc(line)}</div>` });
+      const pos = [v.position.latitude, v.position.longitude];
+      let m = markers.get(id);
+      if (!m) {
+        m = { marker: L.marker(pos, { icon }).bindPopup("", { maxWidth: 360 }), line };
+        markers.set(id, m);
+      } else {
+        m.marker.setLatLng(pos).setIcon(icon);
+        m.line = line;
+      }
+      m.marker.setPopupContent(popupHtml(e, t, line, longName, now));
+    }
+    for (const [id, m] of markers) if (!seen.has(id)) { m.marker.remove(); markers.delete(id); }
+
+    const select = document.getElementById("line"), current = select.value;
+    const sorted = [...lines].sort((a, b) => a.localeCompare(b, "el", { numeric: true }));
+    select.innerHTML = '<option value="">Όλες οι γραμμές</option>' +
+      sorted.map(l => `<option${l === current ? " selected" : ""}>${esc(l)}</option>`).join("");
+    applyFilter();
+
+    delays.sort((a, b) => a - b);
+    document.getElementById("n-veh").textContent = markers.size;
+    document.getElementById("n-trip").textContent = Object.keys(byTrip).length;
+    document.getElementById("median").textContent = delays.length ? fmtMin(delays[delays.length >> 1]) : "–";
+    document.getElementById("updated").textContent =
+      `Feed: ${clock(header)} (πριν ${Math.max(0, Math.round(now - header))}″) · ανανέωση κάθε ${REFRESH_MS / 1000}″`;
+    const stale = now - header > STALE_S;
+    warn.style.display = stale ? "block" : "none";
+    warn.textContent = stale ? "Το feed δεν ανανεώνεται. Τρέχει το πρόγραμμα;" : "";
+    if (!fitted && markers.size) {
+      map.fitBounds(L.featureGroup([...markers.values()].map(m => m.marker)).getBounds().pad(0.1));
+      fitted = true;
+    }
+  } catch (err) {
+    warn.style.display = "block";
+    warn.textContent = "Δεν διαβάστηκε το feed: " + err.message;
+  }
+}
+
+getJSON("names.json").then(n => { names = n; }).catch(() => {}).finally(() => {
+  refresh();
+  setInterval(refresh, REFRESH_MS);
+});
+</script>
+</body>
+</html>
