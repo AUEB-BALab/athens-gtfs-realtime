@@ -33,6 +33,16 @@ RUN_GAP_S = 10 * 60                 # longer silence -> a new run
 ANCHOR_BONUS = 1800                 # departure-anchored trip; outweighs any position-based cost
 DEPARTED_M = 150                    # this far from the first stop counts as departed
 ANCHOR_EARLY_S, ANCHOR_LATE_S = 5 * 60, 15 * 60
+# HMMMatcher, in units of -log probability; one unit = HMM_TAU seconds of position cost.
+HMM_TAU = 300.0
+HMM_SWITCH_MIDRUN = 9.0             # changing trip in the middle of a run
+HMM_SWITCH_TERMINAL = 1.0           # changing trip at a first stop or on a new route code
+HMM_NONE = 12.0                     # per observation, "running no scheduled trip"
+HMM_MISSING = 15.0                  # a tracked trip that no position fits any more
+HMM_PRUNE = 30.0
+HMM_LATE_FREE = 10 * 60             # lateness up to this is unremarkable and costs nothing
+HMM_EARLY_FREE = 5 * 60             # en route, running this much ahead of the timetable is free too
+HMM_DEPARTURE_TAU = 60.0            # at an observed departure, each minute off schedule = 1 unit
 
 
 def _xy(lat, lon):
@@ -316,8 +326,10 @@ class HungarianMatcher(Matcher):
     """Same costs, but the one-to-one assignment minimises the total cost of a line at once,
     so one vehicle cannot take the only trip another vehicle could be running."""
 
-    @staticmethod
-    def _assign(candidates):
+    def _unmatched_cost(self, vid):
+        return UNMATCHED
+
+    def _assign(self, candidates):
         import numpy as np
         from scipy.optimize import linear_sum_assignment
 
@@ -331,7 +343,8 @@ class HungarianMatcher(Matcher):
         # Columns: one per trip, plus one "unmatched" column per vehicle. UNMATCHED dwarfs every
         # real cost, so as many vehicles as possible are matched, then the total cost is minimised.
         cost = np.full((n, k + n), INFEASIBLE)
-        cost[np.arange(n), k + np.arange(n)] = UNMATCHED
+        for i, v in enumerate(vehicles):
+            cost[i, k + i] = self._unmatched_cost(v)
         by_cell = {}
         for c in candidates:
             i, j = vi[c.vid], ti[(c.trip.trip_id, c.day)]
@@ -399,13 +412,12 @@ class MemoryMatcher(HungarianMatcher):
             track.fixes.append((m.timestamp, pos, m.bearing or None))
         track.fixes = [f for f in track.fixes if (m.timestamp - f[0]).total_seconds() <= HISTORY_S]
 
-        first_stops = {c.trip.stop_times[0][1] for c in base}
-        near = [math.dist(pos, _xy(*self.gtfs.stops[s][:2])) for s in first_stops if s in self.gtfs.stops]
-        if near and min(near) <= TERMINAL_RADIUS_M:
+        near = _first_stop_distance(self.gtfs, pos, base)
+        if near is not None and near <= TERMINAL_RADIUS_M:
             # At the first stop: a new run is about to start, so forget the previous one.
             track.last_at_terminal, track.anchor = m.timestamp, None
             track.fixes = track.fixes[-1:]
-        elif track.last_at_terminal is not None and near and min(near) > DEPARTED_M:
+        elif track.last_at_terminal is not None and near is not None and near > DEPARTED_M:
             departure = track.last_at_terminal + (m.timestamp - track.last_at_terminal) / 2
             track.anchor = self._anchor_trip(base, departure)
             track.last_at_terminal = None
@@ -424,3 +436,97 @@ class MemoryMatcher(HungarianMatcher):
             if best is None or score < best[0]:
                 best = (score, (c.trip.trip_id, c.day))
         return best[1] if best else None
+
+
+def _first_stop_distance(gtfs, pos, candidates):
+    """Distance (m) from `pos` to the nearest first stop of the candidate trips, or None."""
+    stops = {c.trip.stop_times[0][1] for c in candidates}
+    dists = [math.dist(pos, _xy(*gtfs.stops[s][:2])) for s in stops if s in gtfs.stops]
+    return min(dists) if dists else None
+
+
+@dataclass
+class _HMMState:
+    route_code: str
+    timestamp: object
+    scores: dict            # (trip_id, service_day) -> -log score of the best path ending there
+    none: float             # same, for "running no scheduled trip"
+    last_at_terminal: object = None   # last fix at a first stop, while the departure is pending
+
+
+class HMMMatcher(HungarianMatcher):
+    """Online Viterbi per vehicle over "which trip is it running", then Hungarian per line.
+
+    Emissions come from the position-based cost of each trip at each new GPS fix. Staying on a
+    trip is free; changing trip costs HMM_SWITCH_MIDRUN in the middle of a run and only
+    HMM_SWITCH_TERMINAL at a first stop or when the vehicle's route code changes. A vehicle's
+    trip therefore follows the evidence of its whole run, not just its latest position.
+    """
+
+    def __init__(self, gtfs, mapper, use_shapes=True, late_free=HMM_LATE_FREE, early_free=HMM_EARLY_FREE):
+        super().__init__(gtfs, mapper, use_shapes)
+        self.late_free, self.early_free = late_free, early_free
+        self.states = {}
+        self._none_cost = {}
+
+    def _unmatched_cost(self, vid):
+        return self._none_cost.get(vid, UNMATCHED)
+
+    def _candidates(self, line, m):
+        base = super()._candidates(line, m)
+        by_key = {(c.trip.trip_id, c.day): c for c in base}
+        prev = self.states.get(m.vehicle_id)
+        new_run = (prev is None or prev.route_code != m.route_code
+                   or (m.timestamp - prev.timestamp).total_seconds() > RUN_GAP_S)
+        if prev is not None and not new_run and prev.timestamp == m.timestamp:
+            state = prev                                # same GPS fix as last cycle: nothing new
+        else:
+            state = self._update(m, base, by_key, None if new_run else prev)
+        self.states[m.vehicle_id] = state
+        self._none_cost[m.vehicle_id] = state.none * HMM_TAU
+        return [replace(c, cost=state.scores[key] * HMM_TAU - (STICKY_BONUS if c.sticky else 0))
+                for key, c in by_key.items() if key in state.scores]
+
+    def _update(self, m, base, by_key, prev):
+        """One Viterbi step for the vehicle's new GPS fix (prev=None starts a new run)."""
+        near = _first_stop_distance(self.gtfs, _xy(m.lat, m.lon), base)
+        at_first_stop = near is not None and near <= TERMINAL_RADIUS_M
+        last_at_terminal = prev.last_at_terminal if prev else None
+        departure = None
+        if at_first_stop:
+            last_at_terminal = m.timestamp
+        elif last_at_terminal is not None and near is not None and near > DEPARTED_M:
+            departure = last_at_terminal + (m.timestamp - last_at_terminal) / 2
+            last_at_terminal = None
+        changing_allowed = prev is None or at_first_stop or departure is not None
+        switch = HMM_SWITCH_TERMINAL if changing_allowed else HMM_SWITCH_MIDRUN
+        prev_scores, prev_none = (prev.scores, prev.none) if prev else ({}, 0.0)
+        enter = min([prev_none, *prev_scores.values()]) + switch
+        scores = {}
+        for key, c in by_key.items():
+            stay = prev_scores.get(key)
+            scores[key] = self._emission(c, departure) + (enter if stay is None else min(stay, enter))
+        for key, stay in prev_scores.items():
+            if key not in scores:
+                scores[key] = HMM_MISSING + min(stay, enter)
+        none = HMM_NONE + min(prev_none, enter)
+        lowest = min([none, *scores.values()])
+        scores = {k: v - lowest for k, v in scores.items() if v - lowest <= HMM_PRUNE}
+        return _HMMState(m.route_code, m.timestamp, scores, none - lowest, last_at_terminal)
+
+    def _emission(self, c, departure=None):
+        """-log likelihood of the current observation under trip c.
+
+        On the road, buses run late relative to the timetable all the time, so moderate lateness
+        is free and being early stays expensive. At an observed departure from the first stop,
+        though, the departure time pins the trip down: every minute off its schedule counts."""
+        cost = c.raw_cost
+        if not c.waiting:
+            # raw_cost is delay (late) or 3 x |delay| (early); forgive the unremarkable band.
+            cost -= min(c.delay, self.late_free) if c.delay >= 0 else 3 * min(-c.delay, self.early_free)
+        units = cost / HMM_TAU
+        if departure is not None:
+            midnight = datetime(c.day.year, c.day.month, c.day.day, tzinfo=ATHENS)
+            late = (departure - midnight).total_seconds() - c.trip.start
+            units += (late if late >= 0 else -3 * late) / HMM_DEPARTURE_TAU
+        return units
