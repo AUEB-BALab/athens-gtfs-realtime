@@ -179,10 +179,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("db")
     ap.add_argument("--gtfs", default="data/osy_gtfs.zip")
+    ap.add_argument("--blocks", action="store_true",
+                    help="only check whether vehicles follow the GTFS vehicle blocks")
     args = ap.parse_args()
 
     cycles, fixes, eta = load(args.db)
     lines = sorted({line for by_line in cycles.values() for line in by_line})
+    if args.blocks:
+        return block_report(args.gtfs, cycles, fixes)
     gtfs = StaticGTFS(args.gtfs, lines)
     mapper = RouteMapper(gtfs, Telematics())
     methods = {"greedy (now)": Matcher(gtfs, mapper),
@@ -260,6 +264,82 @@ def main():
             oasa.append((actual - polled, polled + minutes * 60 - actual))
     print_table("OASA's own prediction (getStopArrivals)", summarise(oasa))
     paired(eta, truth, results["memory"], trips_by_id)
+
+
+def block_of(trip):
+    """OASA encodes the vehicle block in the trip id: {route}_{service}_{block}_{HHMM}."""
+    return (trip.service_id, trip.trip_id.split("_")[3])
+
+
+def identify_departure(gtfs, mapper, line, route, dep):
+    """Trips of this route that could have left at `dep` (5 min early to 15 min late), best first,
+    as (score, minutes late, trip)."""
+    day = datetime.fromtimestamp(dep, ATHENS).date()
+    shapes = mapper.shapes_for(line, route)
+    out = []
+    for trip in gtfs.trips_for_line(line):
+        if trip.shape_id in shapes and gtfs.service_active(trip.service_id, day):
+            late = dep - midnight_of(day) - trip.start
+            if -300 <= late <= 900:
+                out.append((late if late >= 0 else -3 * late, late / 60, trip))
+    return sorted(out, key=lambda c: c[0])
+
+
+def block_report(gtfs_path, cycles, fixes):
+    """Do vehicles run consecutive trips of the same GTFS vehicle block?"""
+    import csv, io, zipfile
+    with zipfile.ZipFile(gtfs_path) as zf:
+        names = {r["route_short_name"] for r in csv.DictReader(
+            io.TextIOWrapper(zf.open("routes.txt"), encoding="utf-8-sig"))}
+    gtfs = StaticGTFS(gtfs_path, names)           # whole network: blocks span several lines
+    mapper = RouteMapper(gtfs, Telematics())
+    truth = Truth(fixes, gtfs, mapper, route_geometry(gtfs, mapper, Matcher(gtfs, mapper)))
+    blocks = defaultdict(list)
+    for trip in gtfs.trips.values():
+        if len(trip.trip_id.split("_")) == 5:
+            blocks[block_of(trip)].append(trip)
+    for trips in blocks.values():
+        trips.sort(key=lambda t: t.start)
+
+    by_veh, unidentified, lateness = defaultdict(list), 0, []
+    for veh, line, route, dep in truth.departures:
+        cands = identify_departure(gtfs, mapper, line, route, dep)
+        if not cands:
+            unidentified += 1
+            continue
+        margin = cands[1][0] - cands[0][0] if len(cands) > 1 else float("inf")
+        by_veh[veh].append((dep, line, cands[0][2], margin))
+        lateness.append(cands[0][1])
+    print(f"{len(truth.departures)} observed departures; {unidentified} match no scheduled departure "
+          f"within 5 min early .. 15 min late; departure delay median {statistics.median(lateness):+.1f} min")
+
+    pairs, offsets = [], []
+    for veh, deps in by_veh.items():
+        deps.sort(key=lambda d: d[0])
+        for a, b in zip(deps, deps[1:]):
+            if b[0] - a[0] > 3 * 3600:
+                continue
+            nxt = next((t for t in blocks.get(block_of(a[2]), []) if t.start > a[2].start), None)
+            day = datetime.fromtimestamp(b[0], ATHENS).date()
+            route = next(r for v, l, r, d in truth.departures if v == veh and d == b[0])
+            # Could the block's next trip have been the one we saw leave at all?
+            possible = nxt is not None and any(t is nxt for _, _, t in identify_departure(gtfs, mapper, b[1], route, b[0]))
+            if nxt is not None:
+                offsets.append((b[0] - midnight_of(day) - nxt.start) / 60)
+            pairs.append((block_of(a[2]) == block_of(b[2]), nxt is b[2], possible, min(a[3], b[3]) >= 180, a[1] != b[1]))
+    for label, sel in (("all pairs", pairs), ("unambiguous departures only (next-best trip >= 3 min worse)",
+                                              [p for p in pairs if p[3]])):
+        n = len(sel)
+        if not n:
+            continue
+        print(f"\n{label}: {n} consecutive trip pairs of the same vehicle")
+        print(f"  same vehicle block:                         {100 * sum(p[0] for p in sel) / n:5.1f}%")
+        print(f"  exactly the next trip of that block:        {100 * sum(p[1] for p in sel) / n:5.1f}%")
+        print(f"  block's next trip was even a possible match: {100 * sum(p[2] for p in sel) / n:5.1f}%")
+        print(f"  pairs that change line:                     {sum(p[4] for p in sel)}")
+    if len(offsets) >= 10:
+        print("\nobserved departure minus the block's next scheduled departure, deciles (min): "
+              + ", ".join(f"{x:+.0f}" for x in statistics.quantiles(offsets, n=10)))
 
 
 def paired(eta, truth, results, trips_by_id):
