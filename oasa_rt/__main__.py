@@ -15,8 +15,9 @@ import threading
 import time
 from datetime import datetime
 
+from .eta import PassageTracker, RecentSegmentTimes, route_geometry
 from .feed import build_feeds, write_feeds, write_static, write_trip_info
-from .matcher import Matcher, RouteMapper
+from .matcher import HMMMatcher, HungarianMatcher, Matcher, MemoryMatcher, RouteMapper
 from .static import StaticGTFS, download_gtfs, refresh_gtfs
 from .telematics import ATHENS, Telematics, parse_cs_date
 
@@ -24,6 +25,7 @@ from .telematics import ATHENS, Telematics, parse_cs_date
 _GREEK = str.maketrans("ABEZHIKMNOPTYX", "ΑΒΕΖΗΙΚΜΝΟΡΤΥΧ")
 STALE_AFTER = 5 * 60
 EXPIRY_WARNING_DAYS = 7
+MATCHERS = {"greedy": Matcher, "hungarian": HungarianMatcher, "memory": MemoryMatcher, "hmm": HMMMatcher}
 
 
 def normalise_line(name):
@@ -98,6 +100,11 @@ def main():
                     help="minimum seconds between API requests (be gentle with OASA's server)")
     ap.add_argument("--gtfs-check-hours", type=float, default=6,
                     help="how often to look for a new static GTFS on data.gov.gr (0 = never)")
+    ap.add_argument("--matcher", choices=MATCHERS, default="memory",
+                    help="vehicle-to-trip matching (see README for the evaluation)")
+    ap.add_argument("--eta", choices=["recent", "schedule"], default="recent",
+                    help="arrival predictions from recently observed stop-to-stop times, "
+                         "or scheduled time + current delay")
     args = ap.parse_args()
 
     tel = Telematics(min_interval=args.min_request_interval)
@@ -110,8 +117,12 @@ def main():
     if not os.path.exists(args.gtfs):
         print(f"downloading static GTFS to {args.gtfs} ...")
         download_gtfs(args.gtfs)
-    gtfs, matcher = load_static(args.gtfs, lines, tel)
+    gtfs, matcher = load_static(args.gtfs, lines, tel, MATCHERS[args.matcher])
     write_static(args.out, gtfs)
+    # Stop passages seen live feed the recent segment times used for arrival predictions.
+    # Until a segment has been driven a couple of times, its scheduled time is used.
+    segments = RecentSegmentTimes() if args.eta == "recent" else None
+    tracker = PassageTracker(route_geometry(gtfs, matcher.mapper, matcher), segments)
     events = None
     if args.serve:
         os.makedirs(args.out, exist_ok=True)
@@ -129,8 +140,9 @@ def main():
             try:
                 if refresh_gtfs(args.gtfs):
                     print("a new static GTFS was published; reloading", file=sys.stderr)
-                    gtfs, matcher = load_static(args.gtfs, lines, tel)
+                    gtfs, matcher = load_static(args.gtfs, lines, tel, MATCHERS[args.matcher])
                     write_static(args.out, gtfs)
+                    tracker = PassageTracker(route_geometry(gtfs, matcher.mapper, matcher), segments)
             except Exception as exc:  # keep serving with the current feed
                 print(f"static GTFS update check failed: {exc!r}", file=sys.stderr)
             warn_expiry(gtfs)
@@ -138,27 +150,33 @@ def main():
         tel.requests = 0
         matches = []
         for line, route_codes in lines.items():
-            matches += matcher.match_line(line, poll(tel, route_codes, now))
+            vehicles = poll(tel, route_codes, now)
+            for v in vehicles:
+                tracker.observe(v["VEH_NO"], line, v["ROUTE_CODE"], parse_cs_date(v["CS_DATE"]).timestamp(),
+                                float(v["CS_LAT"]), float(v["CS_LNG"]), float(v.get("VEH_HEADING") or 0))
+            matches += matcher.match_line(line, vehicles)
+        if segments:
+            segments.prune(now.timestamp())
         # Stamp the feed when polling finished, so consecutive headers are evenly spaced.
-        vehicles_msg, trips_msg = build_feeds(matches, datetime.now(ATHENS))
+        vehicles_msg, trips_msg = build_feeds(matches, datetime.now(ATHENS), segments)
         write_feeds(args.out, vehicles_msg, trips_msg)
         write_trip_info(args.out, matches, gtfs)
         if events:
             events.publish()
-        _report(now, matches, tel.requests, time.monotonic() - cycle_start)
+        _report(now, matches, tel.requests, time.monotonic() - cycle_start, segments)
         if args.once:
             return 0
         time.sleep(max(1.0, args.interval - (time.monotonic() - cycle_start)))
 
 
-def load_static(path, lines, tel):
+def load_static(path, lines, tel, matcher_class=MemoryMatcher):
     t0 = time.monotonic()
     gtfs = StaticGTFS(path, lines)
     print(f"loaded {len(gtfs.trips)} trips for {len(lines)} lines in {time.monotonic() - t0:.1f}s")
     for line in lines:
         if not gtfs.trips_for_line(line):
             print(f"note: line {line} has no trips in the static GTFS", file=sys.stderr)
-    return gtfs, Matcher(gtfs, RouteMapper(gtfs, tel))
+    return gtfs, matcher_class(gtfs, RouteMapper(gtfs, tel))
 
 
 def warn_expiry(gtfs):
@@ -209,12 +227,13 @@ def _age(vehicle, now):
         return float("inf")
 
 
-def _report(now, matches, requests, elapsed):
+def _report(now, matches, requests, elapsed, segments=None):
     matched = [m for m in matches if m.trip]
     delays = [m.delay / 60 for m in matched if not m.waiting_at_start]
     summary = f"median delay {statistics.median(delays):+.1f} min" if delays else "no delays"
     print(f"[{now:%H:%M:%S}] {len(matches)} vehicles, {len(matched)} matched to trips, {summary} "
-          f"({requests} API requests, {elapsed:.1f}s)")
+          f"({requests} API requests, {elapsed:.1f}s)"
+          + (f", {len(segments)} stop-to-stop traversals observed in the last 45 min" if segments is not None else ""))
     for m in sorted(matches, key=lambda m: (m.line, m.route_code)):
         if m.trip:
             stop = m.trip.stop_times[0 if m.waiting_at_start else m.next_index]

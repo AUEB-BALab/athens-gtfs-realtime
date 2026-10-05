@@ -7,7 +7,11 @@ from collections import Counter
 from google.protobuf import json_format
 from google.transit import gtfs_realtime_pb2 as rt
 
+from datetime import datetime
+
+from .eta import predict_arrivals
 from .static import service_date_str
+from .telematics import ATHENS
 
 
 def _message(now):
@@ -25,7 +29,9 @@ def _trip_descriptor(desc, m):
     desc.schedule_relationship = rt.TripDescriptor.SCHEDULED
 
 
-def build_feeds(matches, now):
+def build_feeds(matches, now, model=None):
+    """model: a RecentSegmentTimes for per-stop arrival predictions; None gives "scheduled
+    time + current delay" for every stop."""
     # The header must not be older than any entity; OASA's GPS fixes can be a few seconds
     # newer than the start of the polling cycle.
     newest = max([now] + [m.timestamp for m in matches])
@@ -60,16 +66,31 @@ def build_feeds(matches, now):
         _trip_descriptor(tu.trip, m)
         tu.vehicle.id = m.vehicle_id
         tu.timestamp = int(m.timestamp.timestamp())
-        stu = tu.stop_time_update.add()
-        stu.stop_sequence = stop[0]
-        stu.stop_id = stop[1]
-        stu.schedule_relationship = rt.TripUpdate.StopTimeUpdate.SCHEDULED
-        # A single delay propagates to all downstream stops (GTFS-RT spec).
-        if m.waiting_at_start:
-            stu.departure.delay = m.delay
-        else:
-            stu.arrival.delay = m.delay
+        _stop_time_updates(tu, m, model)
     return vehicles, trip_updates
+
+
+def _stop_time_updates(tu, m, model):
+    """A predicted time (and the matching delay) for every stop still ahead, anchored at the GPS
+    fix the vehicle's position was measured from."""
+    day = m.service_day
+    midnight = datetime(day.year, day.month, day.day, tzinfo=ATHENS).timestamp()
+    last = None
+    for k, stop_id, t in predict_arrivals(m.trip, day, m.delay, m.next_index, m.waiting_at_start,
+                                          m.timestamp.timestamp(), model):
+        seq, _, arr, dep = m.trip.stop_times[k]
+        t = int(round(t))
+        if last is not None and t <= last:
+            t = last + 1                    # keep times strictly increasing along the trip
+        last = t
+        stu = tu.stop_time_update.add()
+        stu.stop_sequence = seq
+        stu.stop_id = stop_id
+        stu.schedule_relationship = rt.TripUpdate.StopTimeUpdate.SCHEDULED
+        departing = m.waiting_at_start and k == 0
+        event = stu.departure if departing else stu.arrival
+        event.time = t
+        event.delay = t - int(midnight + (dep if departing else arr))
 
 
 def _write_atomic(path, data):

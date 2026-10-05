@@ -19,14 +19,12 @@ import statistics
 from collections import defaultdict
 from datetime import datetime
 
-from .eta import RecentSegmentTimes, predict_arrivals
-from .matcher import MAX_OFF_ROUTE_M, HMMMatcher, HungarianMatcher, Matcher, MemoryMatcher, RouteMapper, _xy
+from .eta import PassageTracker, RecentSegmentTimes, predict_arrivals, route_geometry
+from .matcher import HMMMatcher, HungarianMatcher, Matcher, MemoryMatcher, RouteMapper
 from .static import StaticGTFS
 from .telematics import ATHENS, Telematics
 
 HORIZONS = [(0, 5), (5, 10), (10, 20), (20, 30)]    # minutes ahead
-MAX_FIX_GAP_S = 180          # no passage is interpolated across a longer gap between fixes
-RUN_GAP_S = 600
 OVERTAKE_MARGIN_M = 150      # both before and after the swap, to ignore GPS noise
 
 
@@ -52,86 +50,34 @@ def load(path):
 
 # ---------------------------------------------------------------- ground truth from GPS
 
-class Truth:
-    def __init__(self, fixes, gtfs, mapper, geometry_of):
+class Truth(PassageTracker):
+    """Stop passages, departures and positions along the route, from the recorded GPS fixes,
+    using the same tracker as the live feed."""
+
+    def __init__(self, fixes, geometry_of):
+        super().__init__(geometry_of, RecentSegmentTimes())
         self.passages = defaultdict(list)   # (veh, stop_id) -> sorted passage timestamps
         self.departures = []                # (veh, line, route_code, departure_ts)
         self.along = defaultdict(dict)      # veh -> {ts: (route_code, distance along route)}
-        self.segments = RecentSegmentTimes() # stop-to-stop traversals, for arrival predictions
         for veh, by_ts in fixes.items():
-            run = []
             for ts in sorted(by_ts):
                 line, route, lat, lon, heading = by_ts[ts]
-                if run and (route != run[-1][2] or ts - run[-1][0] > RUN_GAP_S):
-                    self._run(veh, run, gtfs, mapper, geometry_of)
-                    run = []
-                run.append((ts, line, route, lat, lon, heading))
-            if run:
-                self._run(veh, run, gtfs, mapper, geometry_of)
+                self.observe(veh, line, route, ts, lat, lon, heading)
         for times in self.passages.values():
             times.sort()
 
-    def _run(self, veh, run, gtfs, mapper, geometry_of):
-        line, route = run[0][1], run[0][2]
-        found = geometry_of(line, route)
-        if found is None:
-            return
-        geo, stop_ids = found
-        track, prev = [], None
-        for ts, _, _, lat, lon, heading in run:
-            cands = geo.line.candidates(*_xy(lat, lon), MAX_OFF_ROUTE_M, heading or None)
-            if not cands:
-                continue
-            along = min((c[0] for c in cands), key=lambda a: abs(a - prev) if prev is not None else a)
-            if prev is not None and along < prev - 500:
-                self._passages(veh, line, route, track, geo, stop_ids)   # circular route restarted
-                track = []
-            track.append((ts, along))
-            self.along[veh][ts] = (route, along)
-            prev = along
-        self._passages(veh, line, route, track, geo, stop_ids)
+    def on_position(self, veh, route_code, ts, along):
+        self.along[veh][ts] = (route_code, along)
 
-    def _passages(self, veh, line, route, track, geo, stop_ids):
-        seen = {}
-        for k, (sid, pos) in enumerate(zip(stop_ids, geo.stop_along)):
-            threshold = pos + (50 if k == 0 else 0)     # leaving the first stop, not idling at it
-            for (t0, a0), (t1, a1) in zip(track, track[1:]):
-                if a0 < threshold <= a1 and t1 - t0 <= MAX_FIX_GAP_S:
-                    t = t0 + (threshold - a0) / (a1 - a0) * (t1 - t0)
-                    self.passages[(veh, sid)].append(t)
-                    seen[k] = (sid, t)
-                    if k - 1 in seen and t > seen[k - 1][1]:
-                        self.segments.add(seen[k - 1][0], sid, seen[k - 1][1], t)
-                    if k == 0:
-                        self.departures.append((veh, line, route, t))
-                    break
+    def on_passage(self, veh, line, route_code, stop_index, stop_id, ts):
+        self.passages[(veh, stop_id)].append(ts)
+        if stop_index == 0:
+            self.departures.append((veh, line, route_code, ts))
 
     def passage_after(self, veh, stop_id, after):
         times = self.passages.get((veh, stop_id), [])
         i = bisect.bisect_left(times, after)
         return times[i] if i < len(times) else None
-
-
-def route_geometry(gtfs, mapper, matcher):
-    """(geometry, stop ids) of the most common stop pattern of a live route code, cached."""
-    cache = {}
-
-    def get(line, route):
-        if (line, route) not in cache:
-            shapes = mapper.shapes_for(line, route)
-            trips = [t for t in gtfs.trips_for_line(line) if t.shape_id in shapes]
-            result = None
-            if trips:
-                counts = defaultdict(int)
-                for t in trips:
-                    counts[t.pattern] += 1
-                pattern = max(counts, key=counts.get)
-                trip = next(t for t in trips if t.pattern == pattern)
-                geo = matcher.geometry(trip)
-                result = (geo, list(pattern)) if geo else None
-            cache[(line, route)] = result
-        return cache[(line, route)]
-    return get
 
 
 # ---------------------------------------------------------------- scoring
@@ -181,7 +127,7 @@ def prediction_errors(results, truth, trips_by_id, model=None, schedule_only=Fal
     """Errors of predicted arrivals for every downstream stop the vehicle actually reached.
     model=None: scheduled time + current delay. schedule_only: the timetable, ignoring delay."""
     errors = []
-    for (cycle, veh), (trip_id, day, delay, next_index, waiting, _) in results.items():
+    for (cycle, veh), (trip_id, day, delay, next_index, waiting, _, fix_ts) in results.items():
         if trip_id is None:
             continue
         trip = trips_by_id[trip_id]
@@ -190,8 +136,9 @@ def prediction_errors(results, truth, trips_by_id, model=None, schedule_only=Fal
             predictions = ((sid, base + (dep if waiting else arr))
                            for _, sid, arr, dep in trip.stop_times[next_index - (1 if waiting else 0):])
         else:
+            # As in the live feed: anchored at the GPS fix the delay was measured from.
             predictions = ((sid, t) for _, sid, t in
-                           predict_arrivals(trip, day, delay, next_index, waiting, cycle, model))
+                           predict_arrivals(trip, day, delay, next_index, waiting, fix_ts, model))
         for stop_id, predicted in predictions:
             actual = truth.passage_after(veh, stop_id, cycle)
             if actual is None or actual - cycle > HORIZONS[-1][1] * 60:
@@ -233,12 +180,12 @@ def main():
                 for m in matcher.match_line(line, vehicles):
                     results[name][(cycle, m.vehicle_id)] = (
                         m.trip.trip_id if m.trip else None, m.service_day, m.delay, m.next_index,
-                        m.waiting_at_start, m.route_code)
+                        m.waiting_at_start, m.route_code, m.timestamp.timestamp())
                     track = getattr(matcher, "tracks", {}).get(m.vehicle_id)
                     if m.trip and track and track.anchor == (m.trip.trip_id, m.service_day):
                         anchored.add((cycle, m.vehicle_id))
 
-    truth = Truth(fixes, gtfs, mapper, route_geometry(gtfs, mapper, methods["greedy (now)"]))
+    truth = Truth(fixes, route_geometry(gtfs, mapper, methods["greedy (now)"]))
     n_pass = sum(len(v) for v in truth.passages.values())
     print(f"ground truth: {n_pass} stop passages, {len(truth.departures)} observed departures")
 
@@ -288,17 +235,18 @@ def main():
     model = CachedSegments(truth.segments)
     for name in names:
         print_table(f"{name}: scheduled time + current delay", summarise(prediction_errors(results[name], truth, trips_by_id)))
-    print_table("hmm's trips: recent observed segment times", summarise(
-        prediction_errors(results["hmm"], truth, trips_by_id, model=model)))
-    print_table("schedule only (hmm's trips, no delay) = what Google Maps shows today",
-                summarise(prediction_errors(results["hmm"], truth, trips_by_id, schedule_only=True)))
+    # The live feed's configuration: memory matcher + recent segment times.
+    print_table("memory: recent observed segment times (the live feed)", summarise(
+        prediction_errors(results["memory"], truth, trips_by_id, model=model)))
+    print_table("schedule only (memory's trips, no delay) = what Google Maps shows today",
+                summarise(prediction_errors(results["memory"], truth, trips_by_id, schedule_only=True)))
     oasa = []
     for polled, stop_id, veh, minutes in eta:
         actual = truth.passage_after(veh, stop_id, polled - 60)
         if actual is not None and actual - polled <= HORIZONS[-1][1] * 60:
             oasa.append((actual - polled, polled + minutes * 60 - actual))
     print_table("OASA's own prediction (getStopArrivals)", summarise(oasa))
-    paired(eta, truth, results["hmm"], trips_by_id, model)
+    paired(eta, truth, results["memory"], trips_by_id, model)
 
 
 def block_of(trip):
@@ -328,7 +276,7 @@ def block_report(gtfs_path, cycles, fixes):
             io.TextIOWrapper(zf.open("routes.txt"), encoding="utf-8-sig"))}
     gtfs = StaticGTFS(gtfs_path, names)           # whole network: blocks span several lines
     mapper = RouteMapper(gtfs, Telematics())
-    truth = Truth(fixes, gtfs, mapper, route_geometry(gtfs, mapper, Matcher(gtfs, mapper)))
+    truth = Truth(fixes, route_geometry(gtfs, mapper, Matcher(gtfs, mapper)))
     blocks = defaultdict(list)
     for trip in gtfs.trips.values():
         if len(trip.trip_id.split("_")) == 5:
@@ -393,14 +341,14 @@ def paired(eta, truth, results, trips_by_id, model):
         i = bisect.bisect_right([c for c, _ in hist], polled) - 1
         if i < 0 or polled - hist[i][0] > 60:
             continue
-        cycle, (trip_id, day, delay, next_index, waiting, _) = hist[i]
+        cycle, (trip_id, day, delay, next_index, waiting, _, fix_ts) = hist[i]
         if not trip_id:
             continue
         trip = trips_by_id[trip_id]
-        plain = {sid: t for _, sid, t in predict_arrivals(trip, day, delay, next_index, waiting, cycle)}
+        plain = {sid: t for _, sid, t in predict_arrivals(trip, day, delay, next_index, waiting, fix_ts)}
         if stop_id not in plain:
             continue
-        learned = {sid: t for _, sid, t in predict_arrivals(trip, day, delay, next_index, waiting, cycle, model)}
+        learned = {sid: t for _, sid, t in predict_arrivals(trip, day, delay, next_index, waiting, fix_ts, model)}
         ours.append((actual - polled, plain[stop_id] - actual))
         recent.append((actual - polled, learned[stop_id] - actual))
         theirs.append((actual - polled, polled + minutes * 60 - actual))
